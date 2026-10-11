@@ -1,0 +1,36 @@
+# cargo-fuzz 目标 crate。
+#
+# 注意：本 crate **不是** `../Cargo.toml` 的 workspace 成员，cargo-fuzz 会独立处理它。
+# 因此 `cargo test` / `cargo clippy` 在仓库根下不会编译到本目录。
+
+[package]
+name = "qualia-transport-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+# fuzz 目标把任意字节喂给库的公共解析入口。
+libfuzzer-sys = "0.4.13"
+# 用默认 feature：图像解码（`qr_scan` 目标正是要覆盖它）必须被编进来。
+qualia-transport = { path = ".." }
+
+# 攻击者可控输入面：扫到的二维码文本。二维码是贴在屏幕上的公开信息，任何人拍到或
+# 截屏之后都能把**任意**文本送进这条路径。
+[[bin]]
+name = "envelope_decode"
+path = "fuzz_targets/envelope_decode.rs"
+test = false
+doc = false
+bench = false
+
+# 攻击者可控输入面：图像解码器。用户导入的图片由别人提供时，它就是一份不可信输入。
+[[bin]]
+name = "qr_scan"
+path = "fuzz_targets/qr_scan.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,26 @@
+# Rust 构建产物
+/target
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.iml
+
+# 操作系统
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# cargo-fuzz 的产物分三类，处置不同（语料库规则见 fuzz/.gitignore）：
+#
+#   fuzz/target/          构建产物，永不入库
+#   fuzz/artifacts/       崩溃输入，只在调查期间有用，属临时产物
+#   fuzz/corpus/<目标>/   跑 fuzz 时机器生成的种子，不入库；值得长期保留的样本
+#                         手工放进 fuzz/regressions/<目标>/，那个目录是入库的。
+/fuzz/target
+/fuzz/artifacts
+
+# 本地环境与密钥（严禁提交任何 2FA 密钥材料）
+.env
+*.local.toml
+secrets/

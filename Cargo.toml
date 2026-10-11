@@ -1,0 +1,67 @@
+[package]
+name = "qualia-transport"
+version = "0.1.0"
+edition = "2024"
+# MSRV 与其余仓库一致。本 crate 自己的代码 1.85 就能编译，最紧的一环是
+# `rqrr`（1.85.1）；把下限钉在 1.89 是为了让整个项目的工具链只有一个数字。
+rust-version = "1.89"
+license = "LGPL-3.0-or-later"
+description = "Transport channels for Qualia2FA: QR code carriage and LAN discovery."
+repository = "https://github.com/Qualia2FA/QualiaTransport"
+readme = "README.md"
+keywords = ["qrcode", "qr", "transport", "offline", "2fa"]
+categories = ["encoding"]
+# 发布包里不放 CI 配置、依赖审计清单与 fuzz 目标：它们对使用者没有意义，
+# 而 crates.io 的包体大小与内容都是公开可见的。
+exclude = ["/.github", "/deny.toml", "/fuzz"]
+# 暂时不发布：对外 API 还没稳定到值得占用一个永久版本号（crates.io 上的版本号
+# 一旦占位就永久存在）。依赖它的上层目前也不在别的仓库里。
+publish = false
+
+[dependencies]
+# ── 二维码编码 ────────────────────────────────────────────────────────────
+# Nayuki 的参考实现（同一份源码被移植到十余种语言，上游自带测试向量）。选它的
+# 理由有三条，每条都是这个位置特有的：
+#
+# 1. **它是单文件、零依赖、零 unsafe**（1242 行，含注释）。二维码编码是可以被读
+#    完的算法，能读完就不必信任。
+# 2. **API 正好给出本项目最需要的那个参数对**：`encode_segments_advanced` 收
+#    「最小版本 / 最大版本」，装不下时返回 `DataTooLong`。平台的「最大版本」是能力
+#    声明（见 `src/qr/mod.rs`），编码必须在那一版之内完成，否则就是「装不下」。
+# 3. **它自己就是规范的表**：容量、纠错块划分、掩码罚分都在源码里以公式给出，
+#    而不是一张手抄的表——本项目已经吃过一次「手抄常量抄错却不报错」的亏。
+#
+# 许可证 MIT，与 LGPL-3.0-or-later 兼容。
+qrcodegen = "1.8.0"
+
+# ── 二维码解码（从图像里读） ──────────────────────────────────────────────
+# 桌面端没有摄像头，「选一张图片导入」是它唯一的扫码路径；移动端走平台相机、
+# 拿到的已经是文本，不需要图像解码。因此它是可选依赖，默认开启、可以关掉。
+#
+# 关掉默认 feature 是为了甩开它的 `image` 依赖：我们喂给它的是**灰度像素**，
+# 图像格式的解码归平台（见 `src/image.rs` 的说明）。
+#
+# 诚实记一笔：它是本 crate 依赖树里**唯一**带 unsafe 的地方——它自己一行 unsafe
+# 都没有（4749 行，`unsafe` 零命中），但它的直接依赖 `lru`（缓存实现）里有。
+# 这就是为什么图像解码被做成一个可以整体关掉的 feature：移动端构建不需要它。
+#
+# `rqrr` 自身维护活跃（2026-09 仍有发布），许可 `(MIT OR Apache-2.0) AND ISC`。
+rqrr = { version = "0.11.0", default-features = false, optional = true }
+
+# 错误类型。与其他仓库同一个 major，避免出现两份 thiserror。
+thiserror = "2.0.21"
+
+[features]
+default = ["scan-image"]
+# 从**图像**里读二维码（图片导入扫描）。
+scan-image = ["dep:rqrr"]
+
+[dev-dependencies]
+# 属性测试：线格式的往返、以及「任意输入都不得 panic」。
+proptest = "1.12.0"
+
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+missing_docs_in_private_items = "warn"
