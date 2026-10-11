@@ -34,3 +34,15 @@ path = "fuzz_targets/qr_scan.rs"
 test = false
 doc = false
 bench = false
+
+# 攻击者可控输入面：局域网大厅的报文与连接信息。
+#
+# **这条比上面两条更宽**：二维码要有人拍到才能把数据送进来，而组播组是共享介质
+# ——同一个网段上任何一台机器都能往 `239.255.81.65:21377` 灌任意字节，不需要任何
+# 前提。大厅的后台线程会把这些字节一条条喂给解析器。
+[[bin]]
+name = "lan_datagram"
+path = "fuzz_targets/lan_datagram.rs"
+test = false
+doc = false
+bench = false

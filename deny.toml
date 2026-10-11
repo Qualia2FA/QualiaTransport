@@ -20,8 +20,29 @@ all-features = true
 [advisories]
 version = 2
 ignore = [
-    # 如有必须暂时接受的公告，在此列出并**附上理由与到期时间**，例如：
-    # { id = "RUSTSEC-0000-0000", reason = "无可利用路径，等上游 0.3.x 修复（复审：2026-12-31）" },
+    # `paste` 已归档（作者自述不再维护）。
+    #
+    # # 它为什么会进来
+    #
+    # `paste` 只在**非 Windows** 的目标上可达：iroh → `netwatch`（监听网卡变化）→
+    # `netdev` → `netlink-packet-*`（Linux 的 netlink 绑定）→ `paste`。`cargo tree
+    # --target x86_64-pc-windows-msvc -i paste` 打印的是「nothing to print」，而
+    # [graph] 一节里列了 Android/iOS，因此 deny 仍然会评估到它。
+    #
+    # # 为什么现在接受
+    #
+    # 1. 它是**过程宏**，在构建期展开，运行时不参与——没有可以被远程触发的执行路径。
+    # 2. **没有安全升级**（advisory 自己写着 `No safe upgrade is available!`）。要真正
+    #    消除它，只能等 `netlink-packet-*` 换掉 `paste`，或者不再依赖 `netwatch`。
+    # 3. 目前 `iroh-lan` 是**桌面端**的 feature（移动端走二维码，拿到的已经是文本），
+    #    因此在 Android/iOS 的真实构建里它根本不会被启用。是 `all-features = true`
+    #    这一行把它拖进了审计视野。
+    #
+    # # 什么时候复审
+    #
+    # 在**移动端也要开 `iroh-lan`** 之前必须重新评估：那时它就不再是「构建期工具」，
+    # 而是会进 `.so` 的代码。复审时先看 `netlink-packet-*` 有没有换掉 `paste`。
+    { id = "RUSTSEC-2024-0436", reason = "只经 Linux 的 netlink 绑定进入（桌面端 feature），过程宏、有界影响、无安全升级；移动端启用 iroh-lan 前必须复审（复审：2027-06-30）" },
 ]
 
 [licenses]
@@ -36,6 +57,10 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "BSL-1.0",
+    # `webpki-roots` 的许可证。它是一份**根证书数据包**（不是代码），随 `iroh-relay`
+    # 与 `n0-dns-resolver` 进来；CDLA-Permissive-2.0 是数据许可，允许任意使用与再分发。
+    # 只要 TLS 那一侧还要信任公共 CA，这条就躲不开。
+    "CDLA-Permissive-2.0",
     "CC0-1.0",
     # `rqrr` 是 `(MIT OR Apache-2.0) AND ISC`——两者都要在清单里。
     "ISC",

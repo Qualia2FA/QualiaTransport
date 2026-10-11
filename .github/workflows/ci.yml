@@ -2,14 +2,16 @@ name: CI
 
 # 说明：本仓库根目录即 crate 根（crate `qualia-transport`），所有 job 都在仓库根执行。
 #
-# 本 crate 是**传输通道**：它解析攻击者可控的输入（扫到的二维码文本、用户导入的图片），
-# 因此 CI 的重点是：
+# 本 crate 是**传输通道**：它解析攻击者可控的输入（扫到的二维码文本、用户导入的图片、
+# 同网段上任何人发来的 UDP 报文），因此 CI 的重点是：
 #   1. 常规四关（fmt / clippy / test / doc），且 `-D warnings`
 #   2. **feature 组合**也要干净——关掉图像解码是移动端的形态，它必须同样能编译、能过测试
-#   3. 移动端目标（Android）真的能编译——本 crate 将来要进 `.so`，而这条路径在
+#   3. 可选的局域网数据面（`iroh-lan`）单独一关：它的依赖树比本体大一个量级，
+#      混进 feature 那一关会让「本体是否干净」这个问题被噪音盖住
+#   4. 移动端目标（Android）真的能编译——本 crate 将来要进 `.so`，而这条路径在
 #      Windows 上永远看不到
-#   4. MSRV 与依赖审计仍然成立
-#   5. fuzz 目标始终可编译（否则它们会悄悄腐烂）
+#   5. MSRV 与依赖审计仍然成立（**不含** `iroh-lan`，理由见那一关的注释）
+#   6. fuzz 目标始终可编译（否则它们会悄悄腐烂）
 
 on:
   push:
@@ -73,8 +75,36 @@ jobs:
       - name: cargo check（aarch64-linux-android）
         run: cargo check --target aarch64-linux-android --no-default-features --lib
 
+  # ── 第二关之二：局域网数据面（`iroh-lan`） ───────────────────────────────
+  # 单独一个 job，因为它是**可选 feature**，而且它的依赖树比本体大一个量级：
+  # 把它混进上面那一关会让「本体的 feature 组合是否干净」这个问题被它的噪音盖住。
+  #
+  # 它跑在 Windows 上而不是 Ubuntu：本 feature 的**真实使用场景是桌面端**，而两侧的
+  # 差异（UDP 绑定、网卡枚举、netlink 与否）恰好都在依赖树里。
+  check-iroh-lan:
+    name: iroh-lan（局域网数据面）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: cargo clippy --features iroh-lan（-D warnings）
+        run: cargo clippy --all-targets --locked --features iroh-lan -- -D warnings
+
+      # 含「同机双端真的走一次 QUIC 握手并交换字节」的集成测试。
+      - name: cargo test --features iroh-lan
+        run: cargo test --locked --features iroh-lan
+
+      - name: cargo doc（不得有警告）
+        run: cargo doc --no-deps --locked --features iroh-lan
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   # ── 第三关：MSRV ─────────────────────────────────────────────────────────
   # Cargo.toml 声明的 rust-version 必须真的能编译通过，否则那个声明就是谎言。
+  #
+  # **刻意不带 `iroh-lan`**：iroh 1.3.0 声明的 rust-version 是 1.91，而本 crate 的
+  # 基线下限是 1.89。把 `--all-features` 写进来会让这一关要求的其实是「iroh 的 MSRV」，
+  # 而那个数字不由本仓库决定。feature 与 MSRV 的这层关系写在 README 的 MSRV 策略里。
   msrv:
     name: MSRV 1.89
     runs-on: ubuntu-latest
