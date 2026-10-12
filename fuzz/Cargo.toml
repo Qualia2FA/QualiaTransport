@@ -46,3 +46,15 @@ path = "fuzz_targets/lan_datagram.rs"
 test = false
 doc = false
 bench = false
+
+# 攻击者可控输入面：动态二维码的**拼装状态机**。
+#
+# 上面前两条都是无状态的（一行文本进去，一份字节或一个错误出来）。拼装器不一样：
+# 它要连续喂若干帧才走得到「先扫了 A 的第 1 帧、再扫 B 的第 2 帧」这类状态，而单条
+# 输入的 fuzz 永远覆盖不到。因此这个目标把输入切成若干段，逐段喂进**同一个**拼装器。
+[[bin]]
+name = "frame_reassemble"
+path = "fuzz_targets/frame_reassemble.rs"
+test = false
+doc = false
+bench = false

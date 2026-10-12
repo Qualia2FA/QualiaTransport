@@ -33,9 +33,9 @@
 //!   这是**选 Base32 而不是 Base64 的真正原因**：Base32 的字母表完全落在二维码的
 //!   字母数字模式里（那 45 个字符），而 Base64 的小写字母不在其中。详见 `base32`
 //!   模块的文档——那是私有模块，因此这里只能写成代码字体，做不了文档链接。
-//! - **帧号/帧数写在 Base32 之前**。将来做「动态二维码」（一张码装不下时连续显示多
-//!   张）时，扫描方**不需要解开任何一帧的载荷**就能知道还差哪几帧。字段现在就有，
-//!   是为了让那个格式升级不必再破一次线格式——**单帧的写法就是 `1/1`**。
+//! - **帧号/帧数写在 Base32 之前**。一张码装不下时连续显示多张，而扫描方**不需要
+//!   解开任何一帧的载荷**就能知道还差哪几帧。单帧的写法就是 `1/1`；多帧的拆与拼在
+//!   [`crate::frame`] 里，本模块只负责表示。
 //! - **不做校验和**。载荷本身在协议层由 AEAD 认证，信封再加一层校验和只会造成
 //!   「校验过了所以它是真的」这种误读。信封只负责**表示**，不负责**认证**：
 //!   它防的是抄错字符，不是伪造。
@@ -66,31 +66,56 @@ pub const MAX_FRAMES: u32 = 255;
 /// 是否接受它由上层判断，信封不替它决定（见 [`decode`] 的说明）。
 #[must_use]
 pub fn encode(payload: &[u8]) -> String {
+    encode_frame(payload, 1, 1)
+}
+
+/// 把**某一帧**编成二维码可承载的文本。
+///
+/// # 为什么它是 `pub(crate)` 而不是 `pub`
+///
+/// 帧号与帧数由**拆帧**那一层（[`crate::frame`]）决定，而不是由调用方随手填。把它
+/// 暴露出去，就等于允许「一份载荷的第 2 帧」被单独造出来——而那种帧除了拼装器之外
+/// 没有任何合法的接收方。拆帧是唯一该做这件事的地方。
+///
+/// 这里**不校验** `index` 与 `total` 的关系（比如 `index <= total`）：那是拆帧与
+/// 拼装两层的职责，而信封只负责表示。重复校验的坏处是两处规则迟早分叉，而分叉的
+/// 症状是「拆帧放过了、拼装又拒绝」这种自相矛盾的报错。
+#[must_use]
+pub(crate) fn encode_frame(payload: &[u8], index: u32, total: u32) -> String {
     let encoded = base32::encode(payload);
-    let mut text = String::with_capacity(PREFIX.len() + 8 + encoded.len());
+    let mut text = String::with_capacity(PREFIX.len() + 12 + encoded.len());
     text.push_str(PREFIX);
-    text.push_str(":1/1:");
+    text.push(':');
+    // 用 `write!` 而不是 `format!`：后者要多分配一次临时 `String`，而这条路径上
+    // 每一帧都走一次。
+    let _ = core::fmt::write(&mut text, format_args!("{index}/{total}:"));
     text.push_str(&encoded);
     text
 }
 
-/// 把二维码承载的文本解回载荷。
+/// 从二维码文本里读出**帧头与载荷段**，不判断是单帧还是多帧。
 ///
-/// # 宽容与严格
+/// # 它是 [`decode`] 与 [`crate::frame::decode_frame`] 的共同底座
 ///
-/// 宽容：首尾空白。有的扫码器会在文本末尾多给一个换行，而那不是用户能控制的事。
+/// 两条路要做的第一件事完全一样（剥前缀、拆帧头、验范围、校验 Base32 之前的规范性），
+/// 差别只在**多帧怎么处置**：单帧入口把它当成「这一版还不支持」，多帧入口把它当成
+/// 正常输入。把公共部分留在这里，那两条路就不会各自漂移。
 ///
-/// 严格：**前导零**（`01/1` 不是规范写法）、**帧号越界**（`2/1`）、以及 Base32 的
-/// 一切非规范写法。理由与 Base32 那一层相同：同一份载荷必须只有一种文本表示，否则
-/// 「这两张码是不是同一张」就没有答案，而重放记账正是靠文本/载荷标识相等来判断的。
+/// # 严格性
+///
+/// **前导零**（`01/1` 不是规范写法）、**帧号越界**（`2/1`）、**帧数超出上限**都被
+/// 拒绝。理由与 Base32 那一层相同：同一份载荷必须只有一种文本表示，否则「这两张码是
+/// 不是同一张」就没有答案，而重放记账正是靠标识相等来判断的。
 ///
 /// # 错误
 ///
 /// - [`Error::NotOurQrText`]：前缀不对（扫到了别家的码）。
 /// - [`Error::MalformedFrameHeader`]：前缀对，但帧头不合法。
-/// - [`Error::MultiFrameUnsupported`]：这张码是多帧的，而当前只实现单帧。
-/// - [`Error::MalformedBase32`]：Base32 载荷不合法。
-pub fn decode(text: &str) -> Result<Vec<u8>> {
+///
+/// 它是 [`decode`] 与 `frame::decode_frame` 的共同底座：两条路要做的第一件事完全
+/// 一样（剥前缀、拆帧头、验范围），差别只在**多帧怎么处置**——单帧入口把它当成
+/// 「这条入口不收」，多帧入口把它当成正常输入。
+pub(crate) fn decode_parts(text: &str) -> Result<(u32, u32, &str)> {
     let text = text.trim();
     let rest = text.strip_prefix(PREFIX).ok_or(Error::NotOurQrText)?;
     let rest = rest.strip_prefix(':').ok_or(Error::NotOurQrText)?;
@@ -99,18 +124,41 @@ pub fn decode(text: &str) -> Result<Vec<u8>> {
     let index = parse_decimal(index).ok_or(Error::MalformedFrameHeader)?;
     let count = parse_decimal(count).ok_or(Error::MalformedFrameHeader)?;
 
-    if count == 1 {
-        if index != 1 {
-            return Err(Error::MalformedFrameHeader);
-        }
-    } else if (2..=MAX_FRAMES).contains(&count) && (1..=count).contains(&index) {
-        // 结构与范围都对，只是这一版还没实现拼装。**如实报告**，不要假装是坏输入：
-        // 将来实现多帧时，正是这个错误告诉我们「这段文本确实是我们写的」。
-        return Err(Error::MultiFrameUnsupported { count });
-    } else {
+    // 帧号与帧数的自洽检查放在这里，而不是各调用点：单帧与多帧都要过它。
+    if count == 0 || count > MAX_FRAMES || index == 0 || index > count {
         return Err(Error::MalformedFrameHeader);
     }
+    Ok((index, count, body))
+}
 
+/// 把二维码承载的文本解回载荷（**只接受单帧**）。
+///
+/// # 它为什么还在
+///
+/// 单帧是最常见的情形（配对引导数据、小载荷），而「解一段文本、拿到字节」不该要求
+/// 调用方先建一个拼装器。多帧请用 [`crate::frame`]。
+///
+/// # 宽容与严格
+///
+/// 宽容：首尾空白。有的扫码器会在文本末尾多给一个换行，而那不是用户能控制的事。
+///
+/// 严格：前导零、帧号越界、以及 Base32 的一切非规范写法（见模块文档的「每一段的
+/// 理由」与 `decode_parts` 的说明——后者是本 crate 的私有项，因此只能写成代码字体）。
+///
+/// # 错误
+///
+/// - [`Error::NotOurQrText`]：前缀不对（扫到了别家的码）。
+/// - [`Error::MalformedFrameHeader`]：前缀对，但帧头不合法。
+/// - [`Error::MultiFrameUnsupported`]：这张码是多帧的，而这条入口只收单帧。
+/// - [`Error::MalformedBase32`]：Base32 载荷不合法。
+pub fn decode(text: &str) -> Result<Vec<u8>> {
+    let (index, count, body) = decode_parts(text)?;
+    if count > 1 {
+        // 结构与范围都对，只是这条入口不收多帧。**如实报告**，不要假装是坏输入：
+        // 调用方据此才知道该改用 `frame::Reassembler`，而不是以为码拍糊了。
+        debug_assert!(index <= count, "帧头自洽由 decode_parts 保证");
+        return Err(Error::MultiFrameUnsupported { count });
+    }
     base32::decode(body)
 }
 

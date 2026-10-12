@@ -218,6 +218,96 @@ fn one_byte_over_capacity_is_reported_in_payload_units() {
     }
 }
 
+/// 多帧：拆帧 → 逐张渲染 → 逐张扫描 → 拼装。
+///
+/// 这是「桌面端展示、另一端逐张扫」那条真实路径的像素版本。三件事必须同时成立：
+/// 每一张都**画得出来**（容量按最长帧头扣掉那几个字符不是白扣的）、每一张都**读得
+/// 回来**、拼出来的字节与原始载荷一致。
+///
+/// 扫描顺序刻意用倒序：帧可以乱序到达，而那正是拼装器存在的理由。
+#[test]
+fn a_multi_frame_payload_round_trips_through_pixels() {
+    let profile = QrProfile::new(EcLevel::Low, 10).expect("版本合法");
+    let single = profile.payload_capacity();
+    // 单帧容量多一个字节：一张装不下，两张装得下。
+    let payload = pseudo_random(single + 1);
+    let symbols = profile
+        .encode_payload_frames(&payload, 4)
+        .expect("两张码装得下这份载荷");
+    assert!(
+        symbols.len() >= 2,
+        "{} 字节超过单帧容量 {single}，应当被拆开，实际 {} 张",
+        payload.len(),
+        symbols.len()
+    );
+    for (index, symbol) in symbols.iter().enumerate() {
+        assert!(
+            symbol.version() <= profile.max_version(),
+            "第 {} 张编出了 {} 版，超过声明的上限 {}",
+            index + 1,
+            symbol.version(),
+            profile.max_version()
+        );
+    }
+
+    let mut reassembler = qualia_transport::frame::Reassembler::from_first_frame();
+    let mut done = None;
+    for symbol in symbols.iter().rev() {
+        let image = symbol.render(4, 4).expect("渲染参数合法");
+        let frame = qr::scan::decode_frame(&image)
+            .unwrap_or_else(|error| panic!("{} 版的码读不回来：{error}", symbol.version()));
+        done = reassembler.accept(frame).expect("每一张都该被收下");
+    }
+    assert_eq!(done.expect("两张都扫到了就该拼齐"), payload);
+}
+
+/// 多帧的码走**单帧入口**时必须报「这条入口只收单帧」，而不是「这不是我们的码」。
+///
+/// 两条扫描入口共用「在整张图里挑出属于本应用的码」那一步，差别只在挑出来之后怎么
+/// 处置。把它们的行为钉在错误类型上：报错了种类，界面上给出的引导就会指向错的方向
+/// （「扫错了码」vs「这张码只是其中一张」）。
+#[test]
+fn the_two_scan_entries_differ_only_in_how_they_treat_multi_frame_codes() {
+    let profile = QrProfile::new(EcLevel::Low, 10).expect("版本合法");
+    let payload = pseudo_random(profile.payload_capacity() + 1);
+    let symbols = profile.encode_payload_frames(&payload, 4).expect("拆得开");
+    assert!(symbols.len() >= 2);
+
+    let first = symbols[0].render(4, 4).expect("渲染参数合法");
+
+    // 多帧入口：解得开，而且是「第 1 张，共 N 张」。
+    let frame = qr::scan::decode_frame(&first).expect("多帧入口必须解得开");
+    assert_eq!(frame.index, 1);
+    assert_eq!(frame.total, symbols.len() as u32);
+    assert_eq!(
+        frame.payload.len(),
+        profile.frame_payload_capacity().min(payload.len()),
+        "第 1 张（非末帧）应当恰好是满载的那一段"
+    );
+    assert_eq!(frame.payload[..], payload[..frame.payload.len()]);
+
+    // 单帧入口：如实报「这条路只收单帧」，而不是把它当成坏码或别人的码。
+    match qr::scan::decode_payload(&first) {
+        Err(Error::MultiFrameUnsupported { count }) => {
+            assert_eq!(count, symbols.len() as u32);
+        }
+        other => panic!("单帧入口应当报「只收单帧」，实际 {other:?}"),
+    }
+
+    // 单帧的码在两个入口下都解得开，且结果一致。
+    let single_payload = pseudo_random(8);
+    let single = profile.encode_payload(&single_payload).expect("装得下");
+    let image = single.render(4, 4).expect("渲染参数合法");
+    assert_eq!(
+        qr::scan::decode_payload(&image).expect("单帧入口"),
+        single_payload
+    );
+    let frame = qr::scan::decode_frame(&image).expect("多帧入口也收单帧");
+    assert_eq!(frame.index, 1);
+    assert_eq!(frame.total, 1);
+    assert_eq!(frame.payload, single_payload);
+}
+
 /// 测试里用的**独立渲染器**：直接把模块画进灰度图。
 ///
 /// 它与 `Symbol::render` 是两份互不相干的实现，因此「读回来的码与写出去的一致」这条

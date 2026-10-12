@@ -27,6 +27,7 @@
 
 use crate::envelope;
 use crate::error::{Error, Result};
+use crate::frame::{self, Frame};
 use crate::image::GrayImage;
 use rqrr::PreparedImage;
 
@@ -60,10 +61,13 @@ pub fn decode_text(image: &GrayImage) -> Result<String> {
     found.ok_or_else(|| report.into_error())
 }
 
-/// 从图像里读出**本应用的**载荷。
+/// 从图像里读出**本应用的**载荷（**只接受单帧**）。
 ///
 /// 与 [`decode_text`] 的区别是它会跳过别人的二维码：同一张图里既有本应用的码、又有
 /// 一个广告二维码时，前者胜出，而不是报「这不是 Qualia2FA 的二维码」。
+///
+/// 多帧的码请用 [`decode_frame`]：这一条是「一段文本 → 一份完整载荷」的便捷入口，
+/// 它遇到多帧会报 [`Error::MultiFrameUnsupported`]（那不是一个错误，而是「走错入口」）。
 ///
 /// # 错误
 ///
@@ -71,15 +75,46 @@ pub fn decode_text(image: &GrayImage) -> Result<String> {
 /// 只是内容坏了，报它的具体错误（例如 [`Error::MalformedBase32`]）；否则报
 /// [`Error::NotOurQrText`]（扫到了别人的码）或 [`Error::NoQrFound`]。
 pub fn decode_payload(image: &GrayImage) -> Result<Vec<u8>> {
-    let mut payload: Option<Vec<u8>> = None;
+    decode_with(image, envelope::decode)
+}
+
+/// 从图像里读出**本应用的一帧**——多帧时是其中一张。
+///
+/// # 它为什么与 [`decode_payload`] 分开
+///
+/// 单帧与多帧是两条不同的路：前者「一张码就是全部」，后者「这一张只是一部分，还要
+/// 拿 [`crate::frame::Reassembler`] 攒」。两条路的第一件事完全相同（在整张图里挑出
+/// **属于本应用**的那张码），差别只在挑出来之后怎么处置——因此它们共用
+/// `decode_with`（本模块的私有函数），错误挑选的规则也完全一致。
+///
+/// 单帧（`1/1`）也走这条路：调用方因此只有一条路径要维护（见
+/// [`crate::frame::decode_frame`]）。
+///
+/// # 错误
+///
+/// 与 [`decode_payload`] 相同，只是不再返回 [`Error::MultiFrameUnsupported`]。
+pub fn decode_frame(image: &GrayImage) -> Result<Frame> {
+    decode_with(image, frame::decode_frame)
+}
+
+/// 在整张图里挑出一张**属于本应用**的码，交给 `parse` 处置。
+///
+/// 两条扫描入口只有 `parse` 不同，而「挑」的规则——跳过别人的码、错误按信息量挑一个
+/// ——必须完全一致：不一致的症状是「单帧能扫出来的图，多帧入口报了一个别的错」。
+/// 它是本模块的私有函数，因此上面那两处只能写成代码字体。
+fn decode_with<T, F>(image: &GrayImage, mut parse: F) -> Result<T>
+where
+    F: FnMut(&str) -> Result<T>,
+{
+    let mut found: Option<T> = None;
     let mut specific: Option<Error> = None;
     let report = scan(image, |raw| {
         let Ok(text) = core::str::from_utf8(raw) else {
             return false;
         };
-        match envelope::decode(text) {
-            Ok(bytes) => {
-                payload = Some(bytes);
+        match parse(text) {
+            Ok(value) => {
+                found = Some(value);
                 true
             }
             Err(error) => {
@@ -92,8 +127,8 @@ pub fn decode_payload(image: &GrayImage) -> Result<Vec<u8>> {
             }
         }
     });
-    match payload {
-        Some(bytes) => Ok(bytes),
+    match found {
+        Some(value) => Ok(value),
         None => Err(specific.unwrap_or_else(|| report.into_error())),
     }
 }

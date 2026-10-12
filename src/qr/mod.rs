@@ -33,7 +33,28 @@
 //! 在**展示之前**就给出这条通道的精确上限，而 [`QrProfile::encode_payload`] 超限时
 //! 报出的 [`Error::PayloadTooLarge`] 带着 `needed` 与 `limit` 两个数字——调用方据此
 //! 才能告诉用户「差多少」，并顺势引导改用局域网通道。
+//!
+//! # 一张装不下时：多帧（动态二维码）
+//!
+//! 一份载荷超过一张码的上限时还有第三条路：**拆成若干张码连续显示**，用户逐张扫
+//! （拆与拼在 [`crate::frame`]）。它不依赖任何网络设施，因此是「没有 WiFi、组播又被
+//! 禁」时唯一还走得通的那条。
+//!
+//! 于是有三个数字，单位都是**载荷字节**，但覆盖的范围不同：
+//!
+//! | 方法 | 含义 |
+//! |------|------|
+//! | [`QrProfile::payload_capacity`] | **一张**码能装多少（单帧，帧头最短） |
+//! | [`QrProfile::frame_payload_capacity`] | 拆帧时**每一张**能装多少（按最长的帧头算） |
+//! | [`QrProfile::exchange_capacity`] | 一次交换（最多 N 张码）合起来能装多少 |
+//!
+//! 前两个不相等（小版本上可能同时为 0），而且**不能混用**：帧头写在信封开头，而它
+//! 的长度随**帧数**的位数增长——帧数到两位数就多 2 个字符，到三位数多 4 个，而
+//! `payload_capacity` 恰好是「再多一个字符就装不下」的那个位置。拿它去切帧，一份
+//! 需要十张以上码的载荷就会切出**渲染不出来**的帧。完整入口是
+//! [`QrProfile::encode_payload_frames`]，它自己取正确的容量，调用方无从弄错。
 
+use crate::envelope;
 use crate::error::{Error, Result};
 use crate::image::GrayImage;
 use qrcodegen::{QrCode, QrCodeEcc, QrSegment, Version};
@@ -124,7 +145,8 @@ impl EcLevel {
 /// # 构造代价
 ///
 /// [`QrProfile::new`] 会**实时算出**这条通道的载荷上限（对编码器做二分搜索，几十次
-/// 编码）。它应当被构造一次并复用，而不是每次展示时重建。
+/// 编码）。它应当被构造一次并复用，而不是每次展示时重建。多帧的容量一并算出来——
+/// 两个数字各一次搜索，而它们都只依赖「纠错级别 + 最大版本」这两个参数。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QrProfile {
     /// 纠错级别。
@@ -133,6 +155,8 @@ pub struct QrProfile {
     max_version: u8,
     /// 这条通道能装下的最大载荷字节数（构造时算好）。
     payload_capacity: usize,
+    /// 拆帧时**每一张**码能装下的最大载荷字节数（构造时算好）。
+    frame_capacity: usize,
 }
 
 impl QrProfile {
@@ -150,7 +174,10 @@ impl QrProfile {
         Ok(Self {
             ec,
             max_version,
-            payload_capacity: payload_capacity(ec, max_version),
+            payload_capacity: capacity_for(ec, max_version, |len| envelope::encode(&vec![0; len])),
+            frame_capacity: capacity_for(ec, max_version, |len| {
+                envelope::encode_frame(&vec![0; len], envelope::MAX_FRAMES, envelope::MAX_FRAMES)
+            }),
         })
     }
 
@@ -170,9 +197,77 @@ impl QrProfile {
     ///
     /// 这是「信封 + Base32 + 二维码」整条链路的最终答案，正是核心库的
     /// `TransportCapabilities::check_fits` 要比较的那个数。
+    ///
+    /// 它说的是**一张码**（单帧）。拆成多张时每一张的上限更小，见
+    /// [`QrProfile::frame_payload_capacity`]。
     #[must_use]
     pub const fn payload_capacity(&self) -> usize {
         self.payload_capacity
+    }
+
+    /// 拆帧时**每一张**码能装下的最大载荷字节数。
+    ///
+    /// # 它为什么小于 [`QrProfile::payload_capacity`]
+    ///
+    /// 帧头写在信封开头（`Q2FA1:<帧号>/<帧数>:`），长度是 `8 + 帧号位数 + 帧数位数`：
+    ///
+    /// | 帧数 | 最长的帧头 | 比单帧（`1/1`）长 |
+    /// |------|-----------|-------------------|
+    /// | 1–9   | `9/9`     | 0 个字符 |
+    /// | 10–99 | `99/99`   | 2 个字符 |
+    /// | 100–255 | `255/255` | 4 个字符 |
+    ///
+    /// 而 `payload_capacity` 是**再多一个字符就换版本**的那个位置，所以帧数一旦上两位数，
+    /// 按它切出来的满载帧就会顶出这个版本。
+    ///
+    /// # 这 4 个字符是按**最坏情况**扣的，这是刻意的
+    ///
+    /// 严格说容量是帧数的函数（3 张码时帧头与单帧一样长，能多装两三个字节），而帧数
+    /// 又由容量算出——那是一个循环。循环里任何一处近似都会变成「界面说要 3 张、第 2 张
+    /// 却渲染不出来」，而按最长帧头扣是一个**与帧数无关**的常数：切得开与画得出按构造
+    /// 一致。代价是每张码少装两三个字节，也就是一万字节的载荷上多半张码的量级。
+    #[must_use]
+    pub const fn frame_payload_capacity(&self) -> usize {
+        self.frame_capacity
+    }
+
+    /// 一次交换最多用 `max_frames` 张码时，合起来能装下的载荷字节数。
+    ///
+    /// # 它给谁用
+    ///
+    /// 平台侧要拿它去声明核心库的 `TransportCapabilities::max_message_len`——那个字段
+    /// 说的是「一条消息」，而一条消息在这里可能横跨几张码。**声明与渲染必须用同一个
+    /// 数字**，否则核心库会批准一份这份载荷渲染不出来的分享。
+    ///
+    /// # 两处夹取，都是格式与算术决定的
+    ///
+    /// - `max_frames` 超过 [`envelope::MAX_FRAMES`] 时按那个上限算：格式写不下第 256
+    ///   帧，再多要几张也不会多出容量。
+    /// - 结果不小于 [`QrProfile::payload_capacity`]：一张码也是「最多 N 张」的一种用法
+    ///   （N ≥ 1 时），而去掉那一项会让极小的版本出现「允许两张码反而装得更少」。
+    #[must_use]
+    pub const fn exchange_capacity(&self, max_frames: u32) -> usize {
+        if max_frames == 0 {
+            // 「一张都不许用」就是装不下任何东西。它不是一个静默的默认值：调用方
+            // 要为此拿到一条可读的错误（`limit: 0`），而不是一个能用的数字。
+            return 0;
+        }
+        let frames = if max_frames > envelope::MAX_FRAMES {
+            envelope::MAX_FRAMES
+        } else {
+            max_frames
+        };
+        let split = match self.frame_capacity.checked_mul(frames as usize) {
+            Some(total) => total,
+            // 溢出只可能出现在调用方给了一个荒唐的帧数上，而那条路上面已经被
+            // `MAX_FRAMES`（255）截断了。留着它是为了不让「不可能」变成一个 panic。
+            None => usize::MAX,
+        };
+        if split > self.payload_capacity {
+            split
+        } else {
+            self.payload_capacity
+        }
     }
 
     /// 把载荷编成一张二维码符号。
@@ -186,6 +281,59 @@ impl QrProfile {
             needed: payload.len(),
             limit: self.payload_capacity,
         })
+    }
+
+    /// 把载荷编成**一张或多张**二维码符号（动态二维码）。
+    ///
+    /// 一张装得下时返回一张，与 [`QrProfile::encode_payload`] 的结果**逐位相同**；
+    /// 装不下时按 [`QrProfile::frame_payload_capacity`] 切开，返回按帧号排列的若干张。
+    /// 调用方把返回的每一张依次显示，用户逐张扫（顺序无所谓，拼装器收任意顺序）。
+    ///
+    /// # 为什么容量不由调用方传
+    ///
+    /// 切帧有两个数字必须一致（切点、每张码的容量），而它们一旦由调用方各传一次，
+    /// 「界面说要 3 张、第 2 张却渲染不出来」就只是一次笔误的距离。这里把两者收进
+    /// 同一个函数：调用方只说「我最多愿意让用户扫几张」。
+    ///
+    /// # 错误
+    ///
+    /// - [`Error::PayloadTooLarge`]：载荷超过
+    ///   [`QrProfile::exchange_capacity`]`(max_frames)`。`needed`/`limit` 都是**载荷
+    ///   字节**，调用方据此可以说清「差多少」，并引导改用局域网。
+    ///
+    /// `max_frames` 要得再多也不会撞上格式的 255 帧上限：那条上限已经折进
+    /// [`QrProfile::exchange_capacity`] 里了（超过它的要求只会让 `limit` 停在那儿），
+    /// 因此从这个入口走不到 [`Error::TooManyFrames`]——那一条属于直接调
+    /// [`crate::frame::encode_frames`] 的调用方。
+    pub fn encode_payload_frames(&self, payload: &[u8], max_frames: u32) -> Result<Vec<Symbol>> {
+        let limit = self.exchange_capacity(max_frames);
+        if payload.len() > limit {
+            return Err(Error::PayloadTooLarge {
+                needed: payload.len(),
+                limit,
+            });
+        }
+        // 一张装得下就只出一张码：多帧是**装不下时**的出路，不是默认路径。这条分支
+        // 同时保证了「同一份载荷在单帧与多帧入口下编出同一张码」。
+        if payload.len() <= self.payload_capacity {
+            return Ok(vec![self.encode_payload(payload)?]);
+        }
+
+        // 帧数上限已经由 `limit` 保证（见文档），因此这里那个 `TooManyFrames` 走不到；
+        // 用 `?` 而不是 `expect` 是因为「走不到」这句话不该变成一个 panic。
+        let texts = crate::frame::encode_frames(payload, self.frame_capacity)?;
+        texts
+            .iter()
+            .map(|text| {
+                encode_within(text, self.ec, self.max_version).ok_or(Error::PayloadTooLarge {
+                    // 走到这里说明切点算错了——那是本模块的 bug，不是调用方的输入问题。
+                    // 仍然返回错误而不是 panic：本 crate 的契约是「任何输入都不得导致
+                    // panic」，而一个内部错误不该成为唯一的例外。
+                    needed: payload.len(),
+                    limit: self.frame_capacity,
+                })
+            })
+            .collect()
     }
 }
 
@@ -372,16 +520,27 @@ impl Symbol {
 ///
 /// 先用倍增找到第一个装不下的长度，再在「最后装得下」与「第一个装不下」之间二分。
 ///
+/// # 「信封头固定」是这条搜索的前提
+///
+/// `make_text` 把「`len` 字节的载荷」编成待编码的文本，而它的**长度只由 `len` 决定、
+/// 与内容无关**（信封头是定长的，Base32 是 8/5 膨胀）。这两条合起来才让搜索有意义：
+/// 否则「这个长度装得下」就不是一个良定义的命题。
+///
+/// 单帧与多帧的差别全部落在这个函数的参数上：多帧那一次传进来的帧头按
+/// [`envelope::MAX_FRAMES`] 取**最长**的一种（见
+/// [`QrProfile::frame_payload_capacity`] 的说明）。
+///
 /// # 为什么用全零字节探测是**精确**的
 ///
 /// Base32 的输出长度只取决于输入长度（`ceil(8n/5)` 个字符），而 Base32 的字母表完全
 /// 落在二维码的字母数字模式里，因此**所需版本只取决于文本长度，与文本内容无关**。
 /// 换句话说「`n` 个字节装不装得下」对同一个 `n` 是一致答案，用零字节探测不会低估也
 /// 不会高估任何别的 `n` 字节载荷。这条性质由 `capacity_is_content_independent` 钉住。
-fn payload_capacity(ec: EcLevel, max_version: u8) -> usize {
-    let fits = |len: usize| {
-        encode_within(&crate::envelope::encode(&vec![0; len]), ec, max_version).is_some()
-    };
+fn capacity_for<F>(ec: EcLevel, max_version: u8, make_text: F) -> usize
+where
+    F: Fn(usize) -> String,
+{
+    let fits = |len: usize| encode_within(&make_text(len), ec, max_version).is_some();
     if !fits(0) {
         // 连空载荷都装不下：只可能是版本号非法，而它在 `QrProfile::new` 里已经被挡住。
         return 0;
@@ -450,6 +609,159 @@ mod tests {
             Err(Error::PayloadTooLarge { needed, limit }) => {
                 assert_eq!(needed, capacity + 1, "needed 应当是载荷字节数");
                 assert_eq!(limit, capacity, "limit 应当是这条通道的上限");
+            }
+            other => panic!("应当报「装不下」，实际 {other:?}"),
+        }
+    }
+
+    /// **拆出来的每一张都必须真的画得出来。**
+    ///
+    /// 这是 [`QrProfile::frame_payload_capacity`] 存在的全部理由。按单帧容量切帧时，
+    /// 帧头在帧数上两位数之后会长出 2 个字符，而单帧容量恰好是「再多一个字符就装不下」
+    /// 的位置——于是那些帧一张也编不出来，症状是「界面说要 10 张，第 10 张渲染失败」。
+    ///
+    /// 两个方向一起钉：多帧容量下每一张都编得出来，而单帧容量下确实有帧编不出来
+    /// （否则这个扣除就是白扣的，后人会把它当成多余的保守值删掉）。
+    #[test]
+    fn frames_split_at_the_multi_frame_capacity_always_render() {
+        for (ec, max_version) in [
+            (EcLevel::Low, 1),
+            (EcLevel::Medium, 1),
+            (EcLevel::Low, 5),
+            (EcLevel::Medium, 10),
+            (EcLevel::High, 20),
+            (EcLevel::Low, 40),
+        ] {
+            let profile = QrProfile::new(ec, max_version).expect("版本合法");
+            let single = profile.payload_capacity();
+            let per_frame = profile.frame_payload_capacity();
+            assert!(
+                per_frame <= single,
+                "多帧容量不该大于单帧容量：{per_frame} > {single}（{} 版、纠错 {}）",
+                max_version,
+                ec.letter()
+            );
+            if single == 0 {
+                // 极小的版本（例如 1 版 H 级）连信封头都装不下，没有可切的载荷。
+                continue;
+            }
+
+            // 十张码：帧号到两位数，正是单帧容量不够用的那一段。
+            let payload = vec![0x5A; single * 10];
+            let symbols = profile
+                .encode_payload_frames(&payload, 20)
+                .unwrap_or_else(|error| panic!("{} 版应当拆得开：{error}", max_version));
+            assert!(
+                symbols.len() >= 10,
+                "{} 字节在 {} 版的 {single} 字节容量下应当要十张以上，实际 {}",
+                payload.len(),
+                max_version,
+                symbols.len()
+            );
+            for (index, symbol) in symbols.iter().enumerate() {
+                assert!(
+                    symbol.version() <= max_version,
+                    "第 {} 张编出了 {} 版，超过声明的上限 {max_version}",
+                    index + 1,
+                    symbol.version()
+                );
+            }
+
+            // 反证：同样的载荷按**单帧**容量切，末帧（帧号与帧数都是两位数，帧头 12 个
+            // 字符）必然顶出版本上限。
+            let texts = crate::frame::encode_frames(&payload, single).expect("切得开");
+            assert!(
+                texts
+                    .iter()
+                    .any(|text| encode_within(text, ec, max_version).is_none()),
+                "按单帧容量 {single} 切的帧竟然每一张都编得出来——那说明多帧容量白扣了字符"
+            );
+
+            // 三位数帧号（`150/150`，最长的帧头）那一段也要走一遍。这里只编符号、
+            // 不渲染像素：像素级的多帧闭环在 `tests/roundtrip.rs` 里。
+            let many = vec![0x3C; single * 100];
+            let symbols = profile
+                .encode_payload_frames(&many, envelope::MAX_FRAMES)
+                .unwrap_or_else(|error| panic!("一百张码应当拆得开：{error}"));
+            assert!(
+                symbols.len() >= 100,
+                "{} 字节应当要一百张以上，实际 {}",
+                many.len(),
+                symbols.len()
+            );
+            for symbol in &symbols {
+                assert!(
+                    symbol.version() <= max_version,
+                    "三位数帧号的那一段编出了 {} 版，超过上限 {max_version}",
+                    symbol.version()
+                );
+            }
+        }
+    }
+
+    /// 一张装得下时，多帧入口与单帧入口编出**逐位相同**的码。
+    ///
+    /// 两条入口编出两张不同的码，就意味着同一份载荷有两种二维码表示，而「这两张码是
+    /// 不是同一张」在界面上是一件用户看得见的事。
+    #[test]
+    fn one_frame_payloads_take_the_single_frame_path() {
+        let profile = QrProfile::new(EcLevel::Medium, 12).expect("版本合法");
+        let payload = vec![7_u8; profile.payload_capacity()];
+        let single = profile.encode_payload(&payload).expect("单帧装得下");
+        let frames = profile
+            .encode_payload_frames(&payload, 8)
+            .expect("多帧入口也装得下");
+        assert_eq!(frames.len(), 1, "装得下就不该拆");
+        assert_eq!(frames[0].modules(), single.modules());
+        assert_eq!(frames[0].version(), single.version());
+    }
+
+    /// [`QrProfile::exchange_capacity`] 的算术：0 张是装不下、上限按格式夹取、单调不减、
+    /// 且永远不小于单帧容量。
+    #[test]
+    fn exchange_capacity_is_the_declared_limit() {
+        let profile = QrProfile::new(EcLevel::Low, 10).expect("版本合法");
+        let single = profile.payload_capacity();
+        let per_frame = profile.frame_payload_capacity();
+
+        assert_eq!(profile.exchange_capacity(0), 0, "一张都不许用＝装不下");
+        let mut previous = 0;
+        for frames in 0..=envelope::MAX_FRAMES {
+            let capacity = profile.exchange_capacity(frames);
+            assert!(capacity >= previous, "帧数变多不该让容量变小");
+            if frames > 0 {
+                assert!(
+                    capacity >= single,
+                    "一张码也是「最多 {frames} 张」的一种用法"
+                );
+            }
+            assert!(
+                capacity >= per_frame * frames as usize,
+                "{frames} 张码各装 {per_frame} 字节，合起来必须都算得进去"
+            );
+            previous = capacity;
+        }
+        // 三位数帧号写不进格式：要得再多也停在第 255 帧那个数字上。
+        assert_eq!(
+            profile.exchange_capacity(envelope::MAX_FRAMES),
+            profile.exchange_capacity(u32::MAX),
+            "超过格式上限的帧数不该换来更多容量"
+        );
+    }
+
+    /// 超过一次交换的上限时，报出的两个数字都是**载荷字节**。
+    #[test]
+    fn exceeding_the_exchange_capacity_reports_payload_bytes() {
+        let profile = QrProfile::new(EcLevel::Low, 10).expect("版本合法");
+        let limit = profile.exchange_capacity(5);
+        let payload = vec![0_u8; limit + 1];
+        match profile.encode_payload_frames(&payload, 5) {
+            Err(Error::PayloadTooLarge {
+                needed,
+                limit: reported,
+            }) => {
+                assert_eq!(needed, payload.len());
+                assert_eq!(reported, limit);
             }
             other => panic!("应当报「装不下」，实际 {other:?}"),
         }

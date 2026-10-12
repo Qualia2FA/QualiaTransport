@@ -21,6 +21,7 @@
 
 use proptest::prelude::*;
 use qualia_transport::envelope;
+use qualia_transport::frame::{self, Reassembler};
 // 只被二维码闭环那条性质用到；关掉图像解码时它不该留在文件里当未使用导入
 // （CI 的 `-D warnings` 会把「未使用导入」变成错误，而这正是我们想要的严格程度）。
 #[cfg(feature = "scan-image")]
@@ -93,5 +94,92 @@ proptest! {
             Err(Error::PayloadTooLarge { .. }) => {}
             Err(other) => prop_assert!(false, "不该出现的失败：{}", other),
         }
+    }
+
+    /// **任意载荷、任意容量**：拆帧 → 逐张喂给拼装器 → 逐字节还原。
+    ///
+    /// 顺序刻意用倒序，并重复喂第一张：用户扫的时候既不保证顺序，也可能同一张扫到
+    /// 两次。这两件事都不该改变结果。
+    ///
+    /// 载荷长度包含 0：空载荷是一张 `Q2FA1:1/1:`，它必须能原样拼回来（拆帧侧编得出
+    /// 来的，拼装侧就一定收得下——这条性质由两侧共同钉住）。
+    #[test]
+    fn frames_round_trip_through_the_reassembler(
+        payload in arb_bytes(),
+        capacity in 1_usize..64,
+    ) {
+        // 帧数上限是格式的一部分：超过它的输入不属于这条性质（那条路径由
+        // `frame` 模块自己的定长用例覆盖）。
+        prop_assume!(payload.len().div_ceil(capacity) <= envelope::MAX_FRAMES as usize);
+
+        let frames = frame::encode_frames(&payload, capacity).expect("帧数在上限之内");
+        let expected_frames = payload.len().div_ceil(capacity).max(1);
+        prop_assert_eq!(frames.len(), expected_frames);
+
+        // 倒序 + 重复第一张。
+        let mut reassembler = Reassembler::from_first_frame();
+        let mut done = None;
+        for text in frames.iter().rev() {
+            done = reassembler.push(text).expect("自己拆出来的帧必须收得下");
+        }
+        prop_assert_eq!(reassembler.received(), expected_frames);
+        if expected_frames > 1 {
+            // 多帧时「满载帧多长」必须已经被观察到；单帧时没有满载帧可言（`1/1` 的
+            // 那一张就是全部），因此那一条不适用。
+            prop_assert!(reassembler.unit_len().is_some(), "多帧时应当观察到满载长度");
+        }
+        let repeated = reassembler.push(&frames[0]).expect("重复扫不算错");
+        prop_assert!(repeated.is_none(), "齐了之后再扫不该又交出一份");
+        prop_assert_eq!(reassembler.received(), expected_frames, "重复不该改变计数");
+        prop_assert_eq!(done.expect("应当拼齐"), payload.as_slice());
+
+        // 容量已知时同样要还原（`new` 多一条上界检查，其余规则一致）。
+        let mut reassembler = Reassembler::new(capacity);
+        let mut done = None;
+        for text in &frames {
+            done = reassembler.push(text).expect("按容量拆的帧必须收得下");
+        }
+        prop_assert_eq!(done.expect("应当拼齐"), payload);
+    }
+
+    /// 拆出来的每一帧文本都**只**落在二维码的字母数字模式里。
+    ///
+    /// 这条性质在多帧上比单帧更要紧：帧头会随帧号变长（`1/100`、`255/255`），而一旦
+    /// 某个字符不在那 45 个字符里，整张码就会退回字节模式——界面上看不出异常，只是
+    /// 码变大了、更难扫了，而容量表也不再成立。
+    #[test]
+    fn frame_texts_stay_inside_the_alphanumeric_charset(
+        payload in prop::collection::vec(any::<u8>(), 0..200),
+        capacity in 1_usize..8,
+    ) {
+        const ALPHANUMERIC: &str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+        prop_assume!(payload.len().div_ceil(capacity) <= envelope::MAX_FRAMES as usize);
+
+        let frames = frame::encode_frames(&payload, capacity).expect("帧数在上限之内");
+        // 载荷给到 200 字节、容量给到 1，帧号与帧数必然出现过三位数。
+        prop_assert!(
+            frames.iter().all(|text| text
+                .chars()
+                .all(|character| ALPHANUMERIC.contains(character))),
+            "帧文本里出现了字母数字模式之外的字符"
+        );
+    }
+
+    /// **任意文本**都不得让拼装器 panic，也不得让它凭空交出一份载荷。
+    ///
+    /// 它是攻击者可控输入的入口（扫到的文本直接进来），而 `Reassembler` 是**有状态**
+    /// 的：这一条只喂一条文本，状态机那条路由 `fuzz/fuzz_targets/frame_reassemble.rs`
+    /// 覆盖（那里的输入被切成若干段，逐段喂同一个拼装器）。
+    #[test]
+    fn reassembler_never_panics_on_arbitrary_text(text in arb_text()) {
+        let mut reassembler = Reassembler::from_first_frame();
+        if let Ok(Some(bytes)) = reassembler.push(&text) {
+            // 一条文本就凑齐，只可能是「单帧」——那它解出的就是这一帧的内容。
+            let frame = frame::decode_frame(&text).expect("刚解开过的文本必须解得开");
+            prop_assert_eq!(frame.total, 1);
+            prop_assert_eq!(bytes, frame.payload);
+        }
+        // 无论输入是什么，拼装器都不该声称收到过不存在的东西。
+        prop_assert!(reassembler.received() <= 1);
     }
 }
