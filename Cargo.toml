@@ -16,10 +16,6 @@ categories = ["encoding"]
 # part of the published package: they are meaningless to users, and the size and
 # contents of a crates.io package are publicly visible.
 exclude = ["/.github", "/deny.toml", "/fuzz"]
-# Not published yet: the public API is not stable enough to be worth taking a
-# permanent version number (a version number on crates.io exists forever once
-# taken). No upper layer outside this repository depends on it either.
-publish = false
 
 [dependencies]
 # ── QR encoding ───────────────────────────────────────────────────────────────
