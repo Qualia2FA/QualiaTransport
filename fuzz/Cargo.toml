@@ -1,7 +1,8 @@
-# cargo-fuzz 目标 crate。
+# The cargo-fuzz target crate.
 #
-# 注意：本 crate **不是** `../Cargo.toml` 的 workspace 成员，cargo-fuzz 会独立处理它。
-# 因此 `cargo test` / `cargo clippy` 在仓库根下不会编译到本目录。
+# Note: this crate is **not** a workspace member of `../Cargo.toml`; cargo-fuzz
+# handles it separately, so `cargo test` / `cargo clippy` under the repository
+# root never compile this directory.
 
 [package]
 name = "qualia-transport-fuzz"
@@ -13,13 +14,16 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-# fuzz 目标把任意字节喂给库的公共解析入口。
+# The fuzz targets feed arbitrary bytes to the library's public parsing entry
+# points.
 libfuzzer-sys = "0.4.13"
-# 用默认 feature：图像解码（`qr_scan` 目标正是要覆盖它）必须被编进来。
+# Uses the default features: image decoding (the `qr_scan` target is exactly
+# what covers it) must be compiled in.
 qualia-transport = { path = ".." }
 
-# 攻击者可控输入面：扫到的二维码文本。二维码是贴在屏幕上的公开信息，任何人拍到或
-# 截屏之后都能把**任意**文本送进这条路径。
+# Attacker-controlled input surface: scanned QR text. A QR code is public
+# information displayed on a screen, so anyone who photographs or screenshots it
+# can send **arbitrary** text down this path.
 [[bin]]
 name = "envelope_decode"
 path = "fuzz_targets/envelope_decode.rs"
@@ -27,7 +31,9 @@ test = false
 doc = false
 bench = false
 
-# 攻击者可控输入面：图像解码器。用户导入的图片由别人提供时，它就是一份不可信输入。
+# Attacker-controlled input surface: the image decoder. An image the user
+# imports may have been supplied by someone else, which makes it untrusted
+# input.
 [[bin]]
 name = "qr_scan"
 path = "fuzz_targets/qr_scan.rs"
@@ -35,11 +41,14 @@ test = false
 doc = false
 bench = false
 
-# 攻击者可控输入面：局域网大厅的报文与连接信息。
+# Attacker-controlled input surface: the lobby's datagrams and connection
+# information.
 #
-# **这条比上面两条更宽**：二维码要有人拍到才能把数据送进来，而组播组是共享介质
-# ——同一个网段上任何一台机器都能往 `239.255.81.65:21377` 灌任意字节，不需要任何
-# 前提。大厅的后台线程会把这些字节一条条喂给解析器。
+# **This surface is wider than the two above**: a QR code has to be photographed
+# before data can get in, while a multicast group is a shared medium -- any
+# machine on the same subnet can pour arbitrary bytes into `239.255.81.65:21377`
+# with no precondition. The lobby's background thread feeds those bytes to the
+# parser one by one.
 [[bin]]
 name = "lan_datagram"
 path = "fuzz_targets/lan_datagram.rs"
@@ -47,11 +56,14 @@ test = false
 doc = false
 bench = false
 
-# 攻击者可控输入面：动态二维码的**拼装状态机**。
+# Attacker-controlled input surface: the dynamic QR code **reassembly state
+# machine**.
 #
-# 上面前两条都是无状态的（一行文本进去，一份字节或一个错误出来）。拼装器不一样：
-# 它要连续喂若干帧才走得到「先扫了 A 的第 1 帧、再扫 B 的第 2 帧」这类状态，而单条
-# 输入的 fuzz 永远覆盖不到。因此这个目标把输入切成若干段，逐段喂进**同一个**拼装器。
+# The two targets above are stateless (one line of text in, some bytes or an
+# error out). The reassembler is different: it needs several frames in a row to
+# reach states such as "the 1st frame of A was scanned, then the 2nd frame of
+# B", which a single-input fuzz never reaches. This target therefore splits its
+# input into segments and feeds them to the **same** reassembler one by one.
 [[bin]]
 name = "frame_reassemble"
 path = "fuzz_targets/frame_reassemble.rs"

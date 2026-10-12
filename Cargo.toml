@@ -2,8 +2,9 @@
 name = "qualia-transport"
 version = "0.1.0"
 edition = "2024"
-# MSRV 与其余仓库一致。本 crate 自己的代码 1.85 就能编译，最紧的一环是
-# `rqrr`（1.85.1）；把下限钉在 1.89 是为了让整个项目的工具链只有一个数字。
+# MSRV, the same as the rest of the repositories. This crate's own code compiles
+# on 1.85, and the tightest link is `rqrr` (1.85.1); the floor is pinned at 1.89
+# so that the whole project names a single toolchain number.
 rust-version = "1.89"
 license = "LGPL-3.0-or-later"
 description = "Transport channels for Qualia2FA: QR code carriage and LAN discovery."
@@ -11,90 +12,109 @@ repository = "https://github.com/Qualia2FA/QualiaTransport"
 readme = "README.md"
 keywords = ["qrcode", "qr", "transport", "offline", "2fa"]
 categories = ["encoding"]
-# 发布包里不放 CI 配置、依赖审计清单与 fuzz 目标：它们对使用者没有意义，
-# 而 crates.io 的包体大小与内容都是公开可见的。
+# CI configuration, the dependency audit manifest and the fuzz targets are not
+# part of the published package: they are meaningless to users, and the size and
+# contents of a crates.io package are publicly visible.
 exclude = ["/.github", "/deny.toml", "/fuzz"]
-# 暂时不发布：对外 API 还没稳定到值得占用一个永久版本号（crates.io 上的版本号
-# 一旦占位就永久存在）。依赖它的上层目前也不在别的仓库里。
+# Not published yet: the public API is not stable enough to be worth taking a
+# permanent version number (a version number on crates.io exists forever once
+# taken). No upper layer outside this repository depends on it either.
 publish = false
 
 [dependencies]
-# ── 二维码编码 ────────────────────────────────────────────────────────────
-# Nayuki 的参考实现（同一份源码被移植到十余种语言，上游自带测试向量）。选它的
-# 理由有三条，每条都是这个位置特有的：
+# ── QR encoding ───────────────────────────────────────────────────────────────
+# Nayuki's reference implementation (the same source is ported to a dozen
+# languages, and upstream ships its own test vectors). It is a single file with
+# no dependencies and no `unsafe` (1242 lines including comments).
 #
-# 1. **它是单文件、零依赖、零 unsafe**（1242 行，含注释）。二维码编码是可以被读
-#    完的算法，能读完就不必信任。
-# 2. **API 正好给出本项目最需要的那个参数对**：`encode_segments_advanced` 收
-#    「最小版本 / 最大版本」，装不下时返回 `DataTooLong`。平台的「最大版本」是能力
-#    声明（见 `src/qr/mod.rs`），编码必须在那一版之内完成，否则就是「装不下」。
-# 3. **它自己就是规范的表**：容量、纠错块划分、掩码罚分都在源码里以公式给出，
-#    而不是一张手抄的表——本项目已经吃过一次「手抄常量抄错却不报错」的亏。
+# `encode_segments_advanced` takes a "minimum version / maximum version" pair
+# and returns `DataTooLong` when the payload does not fit. A platform's maximum
+# version is a capability declaration (see `src/qr/mod.rs`): encoding must
+# finish inside that version, otherwise the payload does not fit.
 #
-# 许可证 MIT，与 LGPL-3.0-or-later 兼容。
+# Capacity, error-correction block layout and mask penalty are given in the
+# source as formulas rather than as a hand-transcribed table.
+#
+# License MIT, compatible with LGPL-3.0-or-later.
 qrcodegen = "1.8.0"
 
-# ── 二维码解码（从图像里读） ──────────────────────────────────────────────
-# 桌面端没有摄像头，「选一张图片导入」是它唯一的扫码路径；移动端走平台相机、
-# 拿到的已经是文本，不需要图像解码。因此它是可选依赖，默认开启、可以关掉。
+# ── QR decoding (reading from an image) ───────────────────────────────────────
+# Desktop has no camera, so "import an image" is its only scanning path; mobile
+# goes through the platform camera and already holds text, so it needs no image
+# decoding. This is therefore an optional dependency, enabled by default and
+# possible to turn off.
 #
-# 关掉默认 feature 是为了甩开它的 `image` 依赖：我们喂给它的是**灰度像素**，
-# 图像格式的解码归平台（见 `src/image.rs` 的说明）。
+# Default features are turned off to shed its `image` dependency: what this
+# crate feeds it is **grayscale pixels**, and image format decoding belongs to
+# the platform (see `src/image.rs`).
 #
-# 诚实记一笔：它是本 crate 依赖树里**唯一**带 unsafe 的地方——它自己一行 unsafe
-# 都没有（4749 行，`unsafe` 零命中），但它的直接依赖 `lru`（缓存实现）里有。
-# 这就是为什么图像解码被做成一个可以整体关掉的 feature：移动端构建不需要它。
+# This is the **only** part of this crate's dependency tree that involves
+# `unsafe`: `rqrr` itself has none (4749 lines, zero `unsafe` hits), but its
+# direct dependency `lru` (a cache) does. That is why image decoding is a
+# feature that can be turned off as a whole: mobile builds do not need it.
 #
-# `rqrr` 自身维护活跃（2026-09 仍有发布），许可 `(MIT OR Apache-2.0) AND ISC`。
+# `rqrr` is actively maintained (a release as of 2026-09), license `(MIT OR
+# Apache-2.0) AND ISC`.
 rqrr = { version = "0.11.0", default-features = false, optional = true }
 
-# 错误类型。与其他仓库同一个 major，避免出现两份 thiserror。
+# Error types. Same major as the other repositories, to avoid two copies of
+# thiserror.
 thiserror = "2.0.21"
 
-# ── 设备标识 ──────────────────────────────────────────────────────────────
-# `DeviceId`（设备身份公钥的 SHA-256）用在两个地方：大厅公告里「这台设备是谁」，
-# 以及传输层对端的索引。它是**独立子库**，本 crate 因此不需要（也不该）自己再定义
-# 一遍——同一个概念在两个仓库里长出两种表示，会让「这两个值是不是同一台设备」变成
-# 一个需要转换的问题，而转换点正是出错的地方。
+# ── Device identity ───────────────────────────────────────────────────────────
+# `DeviceId` (the SHA-256 of the device identity public key) is used in two
+# places: "which device is this" in lobby announcements, and the peer index of
+# the transport layer. It is an **independent sub-library**, so this crate does
+# not (and must not) define it a second time.
 #
-# 它只带来公钥侧（表示 / 指纹 / 验签）；私钥侧住在平台硬件密钥库里，本 crate 不碰。
+# It brings the public half only (representation / fingerprint / verification);
+# the private half lives in the platform hardware keystore, which this crate
+# never touches.
 #
-# 这里用**版本号**而不是路径：路径依赖会让同一个物理目录在不同仓库里被不同的相对
-# 路径引用，而 GitHub Actions 拒绝把仓库检出到工作区之外。本地要改它的代码时用
-# `[patch.crates-io]` 临时指到同级目录。
+# A **version number** is used here rather than a path: a path dependency would
+# reference the same physical directory through different relative paths in
+# different repositories, and GitHub Actions refuses to check out a repository
+# outside the workspace. To work on its code locally, point `[patch.crates-io]`
+# at the sibling directory.
 qualia-dik = "0.1"
 
-# ── 局域网 socket（只有大厅需要） ─────────────────────────────────────────
-# `std::net::UdpSocket` 已经能做组播（`join_multicast_v4` / `set_multicast_ttl_v4`
-# / `set_multicast_loop_v4`），因此这个依赖**不是**为了组播——它是为了
-# **`SO_REUSEADDR`**，而那正是让「同一台机器上两个进程都能加入同一个组播组」成立的
-# 东西：缺了它，第二个进程要么 `bind` 直接失败（Windows），要么收不到任何东西
-# （Linux）。
+# ── LAN sockets (needed by the lobby only) ────────────────────────────────────
+# `std::net::UdpSocket` already does multicast (`join_multicast_v4` /
+# `set_multicast_ttl_v4` / `set_multicast_loop_v4`), so this dependency is
+# **not** for multicast -- it is for **`SO_REUSEADDR`**, which is what lets two
+# processes on the same machine join the same multicast group: without it the
+# second process either fails `bind` outright (Windows) or receives nothing at
+# all (Linux).
 #
-# 本 crate 用它而不是自己写 `setsockopt`：本 crate 有 `#![forbid(unsafe_code)]`，
-# 而 `setsockopt` 是 `unsafe`。把唯一需要 `unsafe` 的那一步交给一个专门做这件事、
-# 且被广泛使用的 crate，比自己开一个 `unsafe` 的口子更可控。
+# This crate uses it instead of writing `setsockopt` itself: the crate has
+# `#![forbid(unsafe_code)]`, and `setsockopt` is `unsafe`.
 #
-# 它同时让「先建 socket、再设选项、最后 bind」这个正确顺序成为可能——`std` 的
-# `UdpSocket::bind` 是一步到位的，中间没有插选项的机会。
+# It also makes the correct order -- create the socket, set the options, bind --
+# possible: `std`'s `UdpSocket::bind` does all three in one step, with no room
+# for options in between.
 #
-# `socket2` 来自 `rust-lang/socket2`，无其它传递依赖，许可 MIT OR Apache-2.0。
+# `socket2` comes from `rust-lang/socket2`, has no other transitive
+# dependencies, and is licensed MIT OR Apache-2.0.
 socket2 = { version = "0.6", default-features = false, features = ["all"] }
 
-# ── 局域网数据面（可选，feature `iroh-lan`） ──────────────────────────────
-# iroh 是 QUIC + 公钥即身份的点对点传输层。用它而不是自己写 QUIC，理由见
-# `src/lan/transport.rs` 的模块文档：TLS 握手、丢包恢复、以及「不信任网络的前提下
-# 确认对方身份」这三件事都不该由本项目重新实现一遍。
+# ── LAN data plane (optional, feature `iroh-lan`) ─────────────────────────────
+# iroh is a QUIC point-to-point transport layer in which the public key is the
+# identity. See the module documentation in `src/lan/transport.rs`: TLS
+# handshake, loss recovery, and "confirm the peer's identity without trusting
+# the network" are three things this project should not reimplement.
 #
-# **关掉 default features**：默认集里的 `portmapper` 会去路由器上开端口映射（那既是
-# 一次额外的网络动作，也要求路由器支持 UPnP/NAT-PMP），而本项目的局域网通道只要求
-# 同一个广播域内可达。`metrics` 也不需要。TLS 后端显式选 `tls-aws-lc-rs`（见下方
-# `[features]` 的说明）。
+# **Default features are off**: the default set's `portmapper` opens port
+# mappings on the router (an extra network action that also requires
+# UPnP/NAT-PMP support), while this project's LAN channel only requires
+# reachability within one broadcast domain. `metrics` is not needed either. The
+# TLS backend is selected explicitly by the `iroh-lan` feature as
+# `iroh/tls-ring` (see `[features]` below).
 iroh = { version = "1.3.0", default-features = false, optional = true }
 
-# iroh 是 async 的，而本 crate 面对的是同步调用方（界面线程、核心库的同步
-# `Transport`）。桥接方式是起一个运行时并用 `block_on`，因此这里只要运行时与
-# 时间、channel 这几块，不要 `full`。
+# iroh is async, while this crate faces synchronous callers (the UI thread, the
+# core library's synchronous `Transport`). The bridge starts a runtime and uses
+# `block_on`, so only the runtime, time and channel pieces are needed here, not
+# `full`.
 tokio = { version = "1", default-features = false, features = [
     "rt-multi-thread",
     "time",
@@ -103,23 +123,24 @@ tokio = { version = "1", default-features = false, features = [
 
 [features]
 default = ["scan-image"]
-# 从**图像**里读二维码（图片导入扫描）。
+# Reads QR codes from **images** (image import scanning).
 scan-image = ["dep:rqrr"]
-# 局域网的数据面（iroh 的离线配置，D7）。
+# The LAN data plane (iroh's offline configuration).
 #
-# # 为什么 TLS 后端选 `ring` 而不是 D8 说的 `aws-lc-rs`
+# The TLS backend is `ring` rather than `aws-lc-rs`: `aws-lc-rs` is for
+# transport layers that leave the network, where the `X25519MLKEM768` hybrid KEM
+# guards against "record now, decrypt later". This feature is a LAN channel --
+# both ends sit in the same broadcast domain and traffic never leaves it -- so
+# the post-quantum layer buys nothing here, while `aws-lc-rs` needs cmake and
+# NASM to build (this crate cross-compiles to Android).
 #
-# D8 的结论适用于**会出网**的传输层：那里要 `X25519MLKEM768` 混合 KEM 来防「现在
-# 录下来、将来解密」。本 feature 是局域网通道——两端在同一个广播域里、流量根本不出
-# 网，因此后量子那一层的收益为零，而代价是 `aws-lc-rs` 需要 cmake 与 NASM 才能构建
-# （本 crate 要交叉编译到 Android）。
-#
-# **这个取舍有边界，不要外推**：将来接上真正过网的传输（iroh 的 relay、或者别的
-# 出网通道）时，必须回到 D8 的 `aws-lc-rs` 方案，而不是沿用这里的 `ring`。
+# **This trade-off has a boundary and must not be extrapolated**: a transport
+# that really goes over the network (iroh's relay, or another outbound channel)
+# needs `aws-lc-rs`.
 iroh-lan = ["dep:iroh", "dep:tokio", "iroh/tls-ring"]
 
 [dev-dependencies]
-# 属性测试：线格式的往返、以及「任意输入都不得 panic」。
+# Property tests: wire-format round trips, and "no input may cause a panic".
 proptest = "1.12.0"
 
 [lints.rust]

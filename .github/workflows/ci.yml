@@ -1,17 +1,22 @@
 name: CI
 
-# 说明：本仓库根目录即 crate 根（crate `qualia-transport`），所有 job 都在仓库根执行。
+# Note: the repository root is the crate root (crate `qualia-transport`), and
+# every job runs from the repository root.
 #
-# 本 crate 是**传输通道**：它解析攻击者可控的输入（扫到的二维码文本、用户导入的图片、
-# 同网段上任何人发来的 UDP 报文），因此 CI 的重点是：
-#   1. 常规四关（fmt / clippy / test / doc），且 `-D warnings`
-#   2. **feature 组合**也要干净——关掉图像解码是移动端的形态，它必须同样能编译、能过测试
-#   3. 可选的局域网数据面（`iroh-lan`）单独一关：它的依赖树比本体大一个量级，
-#      混进 feature 那一关会让「本体是否干净」这个问题被噪音盖住
-#   4. 移动端目标（Android）真的能编译——本 crate 将来要进 `.so`，而这条路径在
-#      Windows 上永远看不到
-#   5. MSRV 与依赖审计仍然成立（**不含** `iroh-lan`，理由见那一关的注释）
-#   6. fuzz 目标始终可编译（否则它们会悄悄腐烂）
+# This crate is a **transport channel**: it parses attacker-controlled input
+# (scanned QR text, user-imported images, UDP datagrams sent by anyone on the
+# same subnet), so CI focuses on:
+#   1. the usual four checks (fmt / clippy / test / doc), all with `-D warnings`
+#   2. **feature combinations** must be clean too -- image decoding off is the
+#      mobile shape, and it must compile and pass the tests just the same
+#   3. the optional LAN data plane (`iroh-lan`) as its own job: its dependency
+#      tree is an order of magnitude larger than the crate itself, and mixing it
+#      into the feature job would bury "is the crate itself clean?" under noise
+#   4. the mobile target (Android) really compiles -- this crate will go into a
+#      `.so`, and that path is never visible on Windows
+#   5. MSRV and the dependency audit still hold (**without** `iroh-lan`, see the
+#      comment on that job)
+#   6. the fuzz targets always compile (otherwise they rot silently)
 
 on:
   push:
@@ -28,32 +33,35 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ── 第一关：格式、lint、测试（含图像解码） ────────────────────────────────
+  # ── Job 1: fmt, lint, tests (with image decoding) ───────────────────────────
   check-windows:
     name: fmt + clippy + test + doc（Windows）
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      # 关键：--locked 保证 CI 用的就是提交进仓库的锁定版本。
-      # 若有人本地升级依赖却忘了提交 Cargo.lock，这里会直接失败。
+      # Key: `--locked` guarantees that CI uses the versions committed to the
+      # repository. A local dependency upgrade without a committed `Cargo.lock`
+      # fails right here.
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
       - name: cargo clippy（-D warnings）
         run: cargo clippy --all-targets --locked -- -D warnings
 
-      # 含「编码 → 渲染成像素 → 从像素里读回来」的闭环测试与属性测试。
+      # Includes the closed loop "encode → render to pixels → read back from
+      # pixels" and the property tests.
       - name: cargo test
         run: cargo test --locked --all-targets
 
-      # 文档里的 intra-doc 链接按名字解析，坏链在裸跑 `cargo doc` 时只是警告。
+      # Intra-doc links in the documentation are resolved by name; a broken link
+      # is only a warning when `cargo doc` is run bare.
       - name: cargo doc（不得有警告）
         run: cargo doc --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # ── 第二关：feature 组合与移动端目标 ──────────────────────────────────────
+  # ── Job 2: feature combinations and the mobile target ───────────────────────
   check-features:
     name: 无默认 feature + Android 目标
     runs-on: ubuntu-latest
@@ -63,24 +71,29 @@ jobs:
       - name: 安装 Android 目标
         run: rustup target add aarch64-linux-android
 
-      # 关掉图像解码是**移动端的形态**（那边走平台相机，拿到的已经是文本）。
-      # 这条路径上不该留下任何未使用导入或 cfg 写错的地方。
+      # Turning image decoding off is the **mobile shape** (that side goes
+      # through the platform camera and already holds text). No unused import or
+      # wrong `cfg` may be left behind on this path.
       - name: cargo clippy --no-default-features（-D warnings）
         run: cargo clippy --all-targets --no-default-features -- -D warnings
 
       - name: cargo test --no-default-features
         run: cargo test --no-default-features --all-targets
 
-      # 交叉编译到 Android：证明本 crate 在非 Windows、非 x86 的目标上也能构建。
+      # Cross-compiles to Android: proves this crate also builds for a
+      # non-Windows, non-x86 target.
       - name: cargo check（aarch64-linux-android）
         run: cargo check --target aarch64-linux-android --no-default-features --lib
 
-  # ── 第二关之二：局域网数据面（`iroh-lan`） ───────────────────────────────
-  # 单独一个 job，因为它是**可选 feature**，而且它的依赖树比本体大一个量级：
-  # 把它混进上面那一关会让「本体的 feature 组合是否干净」这个问题被它的噪音盖住。
+  # ── Job 2b: LAN data plane (`iroh-lan`) ─────────────────────────────────────
+  # Its own job, because it is an **optional feature** and its dependency tree
+  # is an order of magnitude larger than the crate itself: mixing it into the
+  # job above would bury "is the crate's own feature combination clean?" under
+  # its noise.
   #
-  # 它跑在 Windows 上而不是 Ubuntu：本 feature 的**真实使用场景是桌面端**，而两侧的
-  # 差异（UDP 绑定、网卡枚举、netlink 与否）恰好都在依赖树里。
+  # It runs on Windows rather than Ubuntu: the **real use case for this feature
+  # is the desktop**, and the differences between the two sides (UDP binding,
+  # NIC enumeration, netlink or not) all live in that dependency tree.
   check-iroh-lan:
     name: iroh-lan（局域网数据面）
     runs-on: windows-latest
@@ -90,7 +103,8 @@ jobs:
       - name: cargo clippy --features iroh-lan（-D warnings）
         run: cargo clippy --all-targets --locked --features iroh-lan -- -D warnings
 
-      # 含「同机双端真的走一次 QUIC 握手并交换字节」的集成测试。
+      # Includes the integration test in which two ends on the same machine
+      # really run a QUIC handshake and exchange bytes.
       - name: cargo test --features iroh-lan
         run: cargo test --locked --features iroh-lan
 
@@ -99,12 +113,15 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # ── 第三关：MSRV ─────────────────────────────────────────────────────────
-  # Cargo.toml 声明的 rust-version 必须真的能编译通过，否则那个声明就是谎言。
+  # ── Job 3: MSRV ─────────────────────────────────────────────────────────────
+  # The `rust-version` declared in Cargo.toml must really compile, otherwise the
+  # declaration is a lie.
   #
-  # **刻意不带 `iroh-lan`**：iroh 1.3.0 声明的 rust-version 是 1.91，而本 crate 的
-  # 基线下限是 1.89。把 `--all-features` 写进来会让这一关要求的其实是「iroh 的 MSRV」，
-  # 而那个数字不由本仓库决定。feature 与 MSRV 的这层关系写在 README 的 MSRV 策略里。
+  # **Deliberately without `iroh-lan`**: iroh 1.3.0 declares `rust-version`
+  # 1.91, while this crate's floor is 1.89. Writing `--all-features` here would
+  # make this job require iroh's MSRV instead, a number this repository does not
+  # decide. This relation between features and the MSRV is documented in the
+  # README's MSRV policy.
   msrv:
     name: MSRV 1.89
     runs-on: ubuntu-latest
@@ -119,7 +136,7 @@ jobs:
           cargo +1.89 check --all-targets
           cargo +1.89 check --all-targets --no-default-features
 
-  # ── 第四关：依赖审计 ─────────────────────────────────────────────────────
+  # ── Job 4: dependency audit ─────────────────────────────────────────────────
   deny:
     name: cargo-deny（依赖审计 + 许可证）
     runs-on: ubuntu-latest
@@ -131,9 +148,9 @@ jobs:
           command: check
           arguments: --all-features
 
-  # ── 第五关：fuzz 冒烟 ────────────────────────────────────────────────────
-  # 只跑有限轮数：CI 不可能做长时间 fuzz，但短跑能抓住明显的 panic，
-  # 并保证 fuzz 目标本身始终可编译。
+  # ── Job 5: fuzz smoke test ──────────────────────────────────────────────────
+  # Only a bounded number of rounds: CI cannot run long fuzzing, but a short run
+  # catches obvious panics and keeps the fuzz targets compiling.
   fuzz-smoke:
     name: fuzz 冒烟（限时）
     runs-on: ubuntu-latest
@@ -153,8 +170,9 @@ jobs:
           set -euo pipefail
           for target in $(cargo +nightly fuzz list); do
             echo "::group::fuzz $target"
-            # 先把入库的回归样本喂进语料库：自动生成的 corpus/ 不入库，
-            # 因此它是每次从零开始的；regressions/ 是唯一的持久化保证。
+            # Seed the corpus with the committed regression inputs first: the
+            # generated corpus/ is not committed, so it starts empty every run,
+            # and regressions/ is the only persistent guarantee.
             if [ -d "regressions/$target" ]; then
               mkdir -p "corpus/$target"
               cp -n "regressions/$target"/* "corpus/$target"/ 2>/dev/null || true

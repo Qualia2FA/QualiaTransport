@@ -1,68 +1,80 @@
-# cargo-deny 配置。
+# cargo-deny configuration.
 #
-# 本 crate 是传输通道：它解析**攻击者可控的输入**（扫到的二维码文本、用户导入的图片），
-# 因此依赖审计在这里同样是安全控制，不是杂事。
+# This crate is a transport channel: it parses **attacker-controlled input**
+# (scanned QR text, user-imported images), so dependency auditing is a security
+# control here too, not a chore.
 #
-# 参考：https://embarkstudios.github.io/cargo-deny/
+# Reference: https://embarkstudios.github.io/cargo-deny/
 
 [graph]
-# 按目标平台分别评估依赖。本 crate 要编译到桌面与移动端，而移动端不需要图像解码
-# （平台相机交回的是文本），因此 feature 组合也要一起审。
+# Evaluates dependencies per target platform. This crate compiles for desktop
+# and mobile, and mobile does not need image decoding (the platform camera
+# returns text), so feature combinations are audited too.
 targets = [
     { triple = "x86_64-pc-windows-msvc" },
     { triple = "aarch64-linux-android" },
     { triple = "aarch64-apple-ios" },
 ]
-# 开发依赖与可选 feature（`scan-image` 会拉进 `rqrr` → `lru` → `hashbrown`）也要审：
-# 它们不进产物，但会进 CI 与开发者的构建环境。
+# Dev-dependencies and optional features (`scan-image` pulls in `rqrr` → `lru` →
+# `hashbrown`) are audited too: they do not reach the artifact, but they do
+# enter CI and developer build environments.
 all-features = true
 
 [advisories]
 version = 2
 ignore = [
-    # `paste` 已归档（作者自述不再维护）。
+    # `paste` is archived (the author states it is no longer maintained).
     #
-    # # 它为什么会进来
+    # # How it gets in
     #
-    # `paste` 只在**非 Windows** 的目标上可达：iroh → `netwatch`（监听网卡变化）→
-    # `netdev` → `netlink-packet-*`（Linux 的 netlink 绑定）→ `paste`。`cargo tree
-    # --target x86_64-pc-windows-msvc -i paste` 打印的是「nothing to print」，而
-    # [graph] 一节里列了 Android/iOS，因此 deny 仍然会评估到它。
+    # `paste` is reachable on **non-Windows** targets only: iroh → `netwatch`
+    # (watches NIC changes) → `netdev` → `netlink-packet-*` (Linux netlink
+    # bindings) → `paste`. `cargo tree --target x86_64-pc-windows-msvc -i paste`
+    # prints "nothing to print", but the `[graph]` section lists Android/iOS, so
+    # deny still evaluates it.
     #
-    # # 为什么现在接受
+    # # Why it is accepted for now
     #
-    # 1. 它是**过程宏**，在构建期展开，运行时不参与——没有可以被远程触发的执行路径。
-    # 2. **没有安全升级**（advisory 自己写着 `No safe upgrade is available!`）。要真正
-    #    消除它，只能等 `netlink-packet-*` 换掉 `paste`，或者不再依赖 `netwatch`。
-    # 3. 目前 `iroh-lan` 是**桌面端**的 feature（移动端走二维码，拿到的已经是文本），
-    #    因此在 Android/iOS 的真实构建里它根本不会被启用。是 `all-features = true`
-    #    这一行把它拖进了审计视野。
+    # 1. It is a **proc macro**, expanded at build time and absent at runtime:
+    #    there is no remotely triggerable execution path.
+    # 2. There is **no safe upgrade** (the advisory itself says `No safe upgrade
+    #    is available!`). Removing it requires `netlink-packet-*` dropping
+    #    `paste`, or dropping the `netwatch` dependency.
+    # 3. `iroh-lan` is currently a **desktop** feature (mobile uses QR codes and
+    #    already receives text), so real Android/iOS builds never enable it.
+    #    `all-features = true` is the line that drags it into the audit's view.
     #
-    # # 什么时候复审
+    # # When to review
     #
-    # 在**移动端也要开 `iroh-lan`** 之前必须重新评估：那时它就不再是「构建期工具」，
-    # 而是会进 `.so` 的代码。复审时先看 `netlink-packet-*` 有没有换掉 `paste`。
+    # Re-evaluate before **mobile enables `iroh-lan`** as well: at that point it
+    # is no longer a build-time tool but code that goes into the `.so`. Check
+    # first whether `netlink-packet-*` has dropped `paste`.
     { id = "RUSTSEC-2024-0436", reason = "只经 Linux 的 netlink 绑定进入（桌面端 feature），过程宏、有界影响、无安全升级；移动端启用 iroh-lan 前必须复审（复审：2027-06-30）" },
 ]
 
 [licenses]
 version = 2
-# 本 crate 以 LGPL-3.0-or-later 发布，是一个**独立可复用**的库：任何需要「让两端通过
-# 二维码交换一小段字节」的项目都能用它。因此允许清单按自己的依赖树给。
+# This crate is released under LGPL-3.0-or-later and is an **independently
+# reusable** library: any project that needs "let two ends exchange a small
+# number of bytes through a QR code" can use it. The allow list therefore
+# follows this crate's own dependency tree.
 #
-# 注意：**不包含** GPL-2.0-only / SSPL / BUSL 等与 LGPL-3.0 不兼容或非自由的许可证。
+# Note: GPL-2.0-only / SSPL / BUSL and other licenses that are incompatible with
+# LGPL-3.0 or non-free are **not** included.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "BSL-1.0",
-    # `webpki-roots` 的许可证。它是一份**根证书数据包**（不是代码），随 `iroh-relay`
-    # 与 `n0-dns-resolver` 进来；CDLA-Permissive-2.0 是数据许可，允许任意使用与再分发。
-    # 只要 TLS 那一侧还要信任公共 CA，这条就躲不开。
+    # The license of `webpki-roots`. It is a **root certificate data package**
+    # (not code), arriving with `iroh-relay` and `n0-dns-resolver`;
+    # CDLA-Permissive-2.0 is a data license that allows any use and
+    # redistribution. As long as the TLS side trusts public CAs, this entry
+    # cannot be avoided.
     "CDLA-Permissive-2.0",
     "CC0-1.0",
-    # `rqrr` 是 `(MIT OR Apache-2.0) AND ISC`——两者都要在清单里。
+    # `rqrr` is `(MIT OR Apache-2.0) AND ISC` -- both must be on the list.
     "ISC",
     "LGPL-3.0-or-later",
     "MIT",
@@ -74,35 +86,41 @@ allow = [
 ]
 confidence-threshold = 0.9
 
-# 白名单里有几条当前没有依赖命中（为将来接局域网通道时的 iroh 栈留的），
-# 故把「白名单条目未命中」降级为允许，避免每次加依赖前都被噪音淹没。
+# Several entries in the allow list are currently matched by no dependency (they
+# are kept for the iroh stack of the LAN channel), so "allowed license not
+# encountered" is downgraded to allowed, to avoid drowning in noise before every
+# dependency addition.
 unused-allowed-license = "allow"
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
 
-# 明确禁止的 crate 及其理由。
+# Explicitly banned crates and the reason for each.
 deny = [
-    # 上游 PQClean 已归档；RUSTSEC-2026-0164 标记为不再维护。
+    # Upstream PQClean is archived; RUSTSEC-2026-0164 marks it unmaintained.
     { name = "pqcrypto" },
     { name = "pqcrypto-kyber" },
     { name = "pqcrypto-dilithium" },
-    # AVX2 后端跳过 Fujisaki–Okamoto 隐式拒绝，破坏 CCA 证明。
+    # The AVX2 backend skips Fujisaki–Okamoto implicit rejection, breaking the
+    # CCA proof.
     { name = "pqc_kyber" },
     { name = "cosmian_kyber" },
-    # 混合 KEM 为 pre-verification 且实现旧草案；10 个月 21 条公告。
+    # The hybrid KEM is pre-verification and implements an old draft; 21
+    # advisories in 10 months.
     { name = "libcrux-kem" },
     { name = "libcrux-aesgcm" },
-    # CPace：Rust 生态无可用实现。
+    # CPace: no usable implementation in the Rust ecosystem.
     { name = "cpace" },
     { name = "pake-cpace" },
-    # 已并入 `aes`。
+    # Merged into `aes`.
     { name = "aes-soft" },
     { name = "aesni" },
-    # 图像格式解码器是 CVE 的常客，而本 crate 刻意不碰图片格式：
-    # 格式归平台（JVM 的 ImageIO、Android 的 BitmapFactory、iOS 的 UIImage），
-    # 本 crate 只认像素。把这些挡在门外，免得有人图省事把整条解码链搬进来。
+    # Image format decoders are a regular source of CVEs, and this crate
+    # deliberately does not touch image formats: formats belong to the platform
+    # (the JVM's ImageIO, Android's BitmapFactory, iOS's UIImage), and this
+    # crate accepts pixels only. Keeping these out stops anyone from pulling the
+    # whole decoding chain in for convenience.
     { name = "image" },
     { name = "zune-jpeg" },
     { name = "zune-png" },
@@ -112,9 +130,12 @@ deny = [
     { name = "webp" },
 ]
 
-# 说明：`rand` 不在这里的禁令中。本 crate 自己**不用任何随机数**（二维码编码是确定性的，
-# 载荷里的随机数由上层用 `getrandom` 生成），但 `proptest` 会传递引入它，而测试里
-# 用它是合适的。真正的纪律写在 README 的接口约定里：本 crate 不生成任何密钥材料。
+# Note: `rand` is not among the bans here. This crate itself uses **no
+# randomness at all** (QR encoding is deterministic, and the randomness inside a
+# payload is generated upstream through `getrandom`), but `proptest` pulls it in
+# transitively, and using it in tests is appropriate. The actual discipline is
+# stated in the README's interface contract: this crate generates no key
+# material.
 
 [sources]
 unknown-registry = "deny"
