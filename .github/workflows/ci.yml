@@ -35,7 +35,7 @@ env:
 jobs:
   # ── Job 1: fmt, lint, tests (with image decoding) ───────────────────────────
   check-windows:
-    name: fmt + clippy + test + doc（Windows）
+    name: fmt + clippy + test + doc (Windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +46,7 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
-      - name: cargo clippy（-D warnings）
+      - name: cargo clippy (-D warnings)
         run: cargo clippy --all-targets --locked -- -D warnings
 
       # Includes the closed loop "encode → render to pixels → read back from
@@ -56,25 +56,25 @@ jobs:
 
       # Intra-doc links in the documentation are resolved by name; a broken link
       # is only a warning when `cargo doc` is run bare.
-      - name: cargo doc（不得有警告）
+      - name: cargo doc (no warnings)
         run: cargo doc --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
 
   # ── Job 2: feature combinations and the mobile target ───────────────────────
   check-features:
-    name: 无默认 feature + Android 目标
+    name: No default features + Android target
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: 安装 Android 目标
+      - name: Install the Android target
         run: rustup target add aarch64-linux-android
 
       # Turning image decoding off is the **mobile shape** (that side goes
       # through the platform camera and already holds text). No unused import or
       # wrong `cfg` may be left behind on this path.
-      - name: cargo clippy --no-default-features（-D warnings）
+      - name: cargo clippy --no-default-features (-D warnings)
         run: cargo clippy --all-targets --no-default-features -- -D warnings
 
       - name: cargo test --no-default-features
@@ -82,7 +82,7 @@ jobs:
 
       # Cross-compiles to Android: proves this crate also builds for a
       # non-Windows, non-x86 target.
-      - name: cargo check（aarch64-linux-android）
+      - name: cargo check (aarch64-linux-android)
         run: cargo check --target aarch64-linux-android --no-default-features --lib
 
   # ── Job 2b: LAN data plane (`iroh-lan`) ─────────────────────────────────────
@@ -95,12 +95,12 @@ jobs:
   # is the desktop**, and the differences between the two sides (UDP binding,
   # NIC enumeration, netlink or not) all live in that dependency tree.
   check-iroh-lan:
-    name: iroh-lan（局域网数据面）
+    name: iroh-lan (LAN data plane)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: cargo clippy --features iroh-lan（-D warnings）
+      - name: cargo clippy --features iroh-lan (-D warnings)
         run: cargo clippy --all-targets --locked --features iroh-lan -- -D warnings
 
       # Includes the integration test in which two ends on the same machine
@@ -108,7 +108,7 @@ jobs:
       - name: cargo test --features iroh-lan
         run: cargo test --locked --features iroh-lan
 
-      - name: cargo doc（不得有警告）
+      - name: cargo doc (no warnings)
         run: cargo doc --no-deps --locked --features iroh-lan
         env:
           RUSTDOCFLAGS: -D warnings
@@ -128,17 +128,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 安装 1.89 工具链
+      - name: Install the 1.89 toolchain
         run: rustup toolchain install 1.89 --profile minimal
 
-      - name: cargo +1.89 check（两种 feature 组合）
+      - name: cargo +1.89 check (both feature combinations)
         run: |
           cargo +1.89 check --all-targets
           cargo +1.89 check --all-targets --no-default-features
 
   # ── Job 4: dependency audit ─────────────────────────────────────────────────
   deny:
-    name: cargo-deny（依赖审计 + 许可证）
+    name: cargo-deny (dependency audit + licenses)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -152,18 +152,18 @@ jobs:
   # Only a bounded number of rounds: CI cannot run long fuzzing, but a short run
   # catches obvious panics and keeps the fuzz targets compiling.
   fuzz-smoke:
-    name: fuzz 冒烟（限时）
+    name: fuzz smoke test (time-boxed)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: 安装 nightly（cargo-fuzz 需要 -Zsanitizer）
+      - name: Install nightly (cargo-fuzz needs -Zsanitizer)
         run: rustup toolchain install nightly --component rust-src
 
-      - name: 安装 cargo-fuzz
+      - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
-      - name: 对每个 fuzz 目标跑 60 秒
+      - name: Run each fuzz target for 60 seconds
         working-directory: fuzz
         shell: bash
         run: |
