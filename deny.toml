@@ -49,7 +49,7 @@ ignore = [
     # Re-evaluate before **mobile enables `iroh-lan`** as well: at that point it
     # is no longer a build-time tool but code that goes into the `.so`. Check
     # first whether `netlink-packet-*` has dropped `paste`.
-    { id = "RUSTSEC-2024-0436", reason = "只经 Linux 的 netlink 绑定进入（桌面端 feature），过程宏、有界影响、无安全升级；移动端启用 iroh-lan 前必须复审（复审：2027-06-30）" },
+    { id = "RUSTSEC-2024-0436", reason = "reached only through the Linux netlink bindings (a desktop feature); a procedural macro with bounded impact and no security upgrade. Must be re-evaluated before mobile enables iroh-lan (next review: 2027-06-30)" },
 ]
 
 [licenses]
