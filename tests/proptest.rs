@@ -135,7 +135,10 @@ proptest! {
             );
         }
         let repeated = reassembler.push(&frames[0]).expect("a repeated scan is not an error");
-        prop_assert!(repeated.is_none(), "scanning again after completion must not hand out another");
+        prop_assert!(
+            repeated.is_none(),
+            "scanning again after completion must not hand out another payload"
+        );
         prop_assert_eq!(reassembler.received(), expected_frames, "a repeat must not change the count");
         prop_assert_eq!(done.expect("must reassemble"), payload.as_slice());
 
