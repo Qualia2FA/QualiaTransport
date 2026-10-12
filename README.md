@@ -6,6 +6,8 @@
 这是一个独立可复用的库：任何需要「让两台设备交换一小段字节」的项目都能用它，不需要
 接受 Qualia2FA 的保险库格式、账号模型或同步协议。
 
+English version: [README.en.md](README.en.md).
+
 ```rust
 use qualia_transport::qr::{EcLevel, QrProfile};
 
@@ -152,8 +154,8 @@ crate 的 1.89；**「不联网」目前只到「不构建 relay、不注册 DNS
 - **输入是像素，不是图片文件。** 图像格式的解码归平台（JVM 的 `ImageIO`、Android 的
   `BitmapFactory`、iOS 的 `UIImage`）：格式解码器是历史漏洞的重灾区，而这个库只认像素。
 - **解码器自己的 panic 也不会带崩进程。** 「导入一张别人给的图片」是本库最宽的输入面，
-  而 `rqrr` 0.11.0 里有一处会被退化图像触发的 `assert!`（fuzz 在 2.7 万次执行内就找到
-  了一张）。调用它的每一处都包了 `catch_unwind`，panic 变成 `Error::QrDecoderPanicked`。
+  而 `rqrr` 0.11.0 里有一处会被退化图像触发的 `assert!`。调用它的每一处都包了
+  `catch_unwind`，panic 变成 `Error::QrDecoderPanicked`。
   这是**收敛而不是修复**：真正的修复在上游，而且它依赖 panic 展开——`panic = "abort"`
   的构建里这一层不起作用。
 - **局域网公告是定长 84 字节的 UDP 报文，连接信息是定长 42 字节。** 定长让解析器的
