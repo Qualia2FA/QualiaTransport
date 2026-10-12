@@ -48,13 +48,10 @@
 //!   genuine". The envelope only **represents**, it does not **authenticate**: it guards
 //!   against mistyped characters, not against forgery.
 //!
-//! # Why the QR code does not carry bytes directly
-//!
 //! The byte mode of a QR code can carry arbitrary bytes, at the cost of **only this crate
 //! being able to read them back**: platform cameras (ML Kit, AVFoundation) return strings, a
 //! clipboard holds text, and a human copying a code reads text. The text envelope costs about
-//! 10% of the capacity and buys "every scanner returns the same string" — and the users of
-//! the QR path are exactly people holding all kinds of scanners.
+//! 10% of the capacity and is what every scanner hands back.
 
 use crate::base32;
 use crate::error::{Error, Result};
@@ -82,13 +79,10 @@ pub fn encode(payload: &[u8]) -> String {
 
 /// Encodes **one frame** into text a QR code can carry.
 ///
-/// # Why it is `pub(crate)` rather than `pub`
-///
-/// The frame index and the frame count are decided by the **splitting** layer
-/// ([`crate::frame`]), not filled in by callers as they please. Exposing this would amount to
-/// allowing "frame 2 of a payload" to be constructed on its own — and such a frame has no
-/// legitimate receiver other than the reassembler. Splitting is the only place that should do
-/// this.
+/// The visibility is `pub(crate)`: the frame index and the frame count are decided by the
+/// **splitting** layer ([`crate::frame`]) and are not filled in by callers as they please, and
+/// a frame constructed on its own has no legitimate receiver other than the reassembler.
+/// Splitting is the only place that produces frames.
 ///
 /// The relation between `index` and `total` (say `index <= total`) is **not** validated here:
 /// that is the job of the splitting and reassembly layers, while the envelope only
@@ -145,12 +139,6 @@ pub(crate) fn decode_parts(text: &str) -> Result<(u32, u32, &str)> {
 }
 
 /// Decodes QR text back into a payload (**single frames only**).
-///
-/// # Why it is still here
-///
-/// A single frame is the most common case (pairing bootstrap data, small payloads), and
-/// "decode one text, get bytes" should not require the caller to build a reassembler first.
-/// For multiple frames use [`crate::frame`].
 ///
 /// # Tolerance and strictness
 ///

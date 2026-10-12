@@ -49,13 +49,9 @@ pub enum Error {
 
     /// The number of frames produced (or required) exceeds the format limit.
     ///
-    /// # Why it is a variant separate from [`Error::PayloadTooLarge`]
-    ///
-    /// The two numbers have **different units**: that one is "N bytes needed, M bytes
-    /// allowed", this one is "N frames needed, M frames allowed". Putting both units into one
-    /// variant would leave the caller unable to pass the sentence on to the user — and "Σ
-    /// codes" and "Σ bytes" are two entirely different things to a user (the former means
-    /// "scan a few more codes", the latter "switch channel").
+    /// The two numbers have **different units** from [`Error::PayloadTooLarge`]: that one is
+    /// "N bytes needed, M bytes allowed", this one is "N frames needed, M frames allowed", and
+    /// the caller passes either on to the user as it is.
     ///
     /// The frame limit is fixed by the **format** (the number of decimal digits of
     /// `Q2FA1:<index>/<count>`, see `envelope::MAX_FRAMES`), not by the encoder or the screen.
@@ -144,8 +140,6 @@ pub enum Error {
     NoQrFound,
 
     /// The image decoder **panicked** on this image, and this crate caught it.
-    ///
-    /// # Why it exists
     ///
     /// `rqrr` 0.11.0 has `assert!(x <= i32::MAX as f64)` inside `Perspective::map`, and
     /// degenerate images such as **periodic noise** make its perspective transform produce
@@ -278,13 +272,10 @@ pub enum Error {
 
     /// This frame is **not part of the same payload** as the frames received so far.
     ///
-    /// # Why it deserves a variant of its own
-    ///
-    /// Without it, a user who scans frame 1 of payload A and then frame 2 of payload B
-    /// reassembles wrong bytes — and the error only surfaces at the **AEAD of the payload
-    /// layer**, reported as "decryption failed". That is a signal pointing diagnostics in the
-    /// completely wrong direction ("wrong key"), while all the user needs is to rescan one
-    /// code.
+    /// A user who scans frame 1 of payload A and then frame 2 of payload B would reassemble
+    /// wrong bytes, and the failure would only surface at the **AEAD of the payload layer**,
+    /// reported as "decryption failed" — a signal pointing diagnostics at the wrong key, while
+    /// all the user needs is to rescan one code.
     ///
     /// The reassembly layer therefore does a **cheap shape check** (see the documentation of
     /// the `frame` module) and reports this mix-up early. The "do not distinguish failure

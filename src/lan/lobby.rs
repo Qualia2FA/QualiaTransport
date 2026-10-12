@@ -514,13 +514,10 @@ fn serve(
 /// Windows as well. The interface passed to the join is `UNSPECIFIED`, which leaves
 /// the choice to the routing table; `IP_MULTICAST_TTL` is fixed at 1 so
 /// announcements stay on this segment; `IP_MULTICAST_LOOP` is left enabled, which
-/// same-machine tests rely on.
-///
-/// # Why `socket2` and not `std::net::UdpSocket::bind`
-///
-/// `std`'s `bind` sets no options, and this crate has `#![forbid(unsafe_code)]`
-/// while `setsockopt` is `unsafe`, so the options above can only be set through a
-/// dedicated crate.
+/// same-machine tests rely on. `std`'s `UdpSocket::bind` sets no options, and
+/// `setsockopt` is `unsafe` while this crate has `#![forbid(unsafe_code)]`, so the
+/// options above are set through `socket2` before the socket is handed to
+/// `UdpSocket::from`.
 ///
 /// # Cost of the wildcard bind
 ///

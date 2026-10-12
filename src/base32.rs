@@ -15,25 +15,13 @@
 
 //! Base32 per RFC 4648 §6 (upper-case alphabet).
 //!
-//! # Why it is written here instead of taken from crates.io
-//!
-//! The codec layer of this crate stays **zero-dependency**: the QR envelope is a wire format
-//! of this project's own, and every byte of it should be readable on one screen (see
-//! [`crate::envelope`]). Pulling in a general-purpose Base32 crate would only import the risk
-//! of "one RFC with two slightly different interpretations".
-//!
-//! # Why Base32 rather than Base64
-//!
 //! The QR **alphanumeric mode** accepts 45 characters only: `0`–`9`, `A`–`Z`, space and
 //! `$ % * + - . / :`. Base64's lower-case letters are not among them, so it can only use byte
 //! mode, at 10.67 bits per payload byte; the upper-case letters and digits of Base32 **all**
-//! fall inside alphanumeric mode, at 8.8 bits per payload byte. The difference is about 10%,
-//! and Base32 wins in two more places:
-//!
-//! - **Copying is unambiguous**: the alphabet contains no `0`/`1`/`8`/`9`, so there is no
-//!   `0`/`O` or `1`/`I` ambiguity.
-//! - **Case-insensitive**: the text still decodes after a clipboard, a chat application or OCR
-//!   has been through it.
+//! fall inside alphanumeric mode, at 8.8 bits per payload byte. The alphabet contains no
+//! `0`/`1`/`8`/`9`, so there is no `0`/`O` or `1`/`I` ambiguity when the text is copied, and
+//! decoding is case-insensitive: the text still decodes after a clipboard, a chat application
+//! or OCR has been through it.
 
 use crate::error::{Error, Result};
 

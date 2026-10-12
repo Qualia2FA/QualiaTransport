@@ -150,19 +150,14 @@ const MESSAGE_KIND_HELLO: u8 = 0x01;
 /// Header of an inbound message: kind marker (1 byte) + device id (32 bytes), that is
 /// `kind (1) | device id (32) | payload` for the whole message.
 ///
-/// # Why the device id is in the wire format
-///
 /// The transport layer knows the **endpoint public key** (the one proven by the QUIC
 /// handshake), while the protocol layer needs the **device id** (the one the user sees and
-/// the one on the allow list). The mapping between the two is established by a lobby
-/// announcement or a QR code, and that mapping is **unauthenticated**: anyone can announce
-/// "the endpoint of device X is E". A message therefore carries the sender's own device id,
+/// the one on the allow list). The mapping between the two comes from a lobby announcement
+/// or a QR code and is **unauthenticated**, so a message carries the sender's own device id
 /// and the receiver applies its allow list to it (the core library's `SyncSenderMismatch`
-/// exists for that); whether the sender really is the device it claims is settled out of band
-/// by the pairing flow.
-///
-/// In other words: this field does not **establish** trust, it lets the receiver **apply**
-/// trust it already has.
+/// exists for that); whether the sender really is the device it claims is settled out of
+/// band by the pairing flow. The field does not **establish** trust, it lets the receiver
+/// **apply** trust it already has.
 const ENVELOPE_HEADER_LEN: usize = 1 + qualia_dik::DEVICE_ID_LEN;
 
 /// One peer's address.

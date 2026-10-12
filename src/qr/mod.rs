@@ -221,10 +221,9 @@ impl QrProfile {
 
     /// Maximum payload bytes **each** code holds when a payload is split.
     ///
-    /// # Why it is smaller than [`QrProfile::payload_capacity`]
-    ///
-    /// The frame header sits at the start of the envelope (`Q2FA1:<frame index>/<frame
-    /// count>:`), and its length is `8 + digits(frame index) + digits(frame count)`:
+    /// It is smaller than [`QrProfile::payload_capacity`]: the frame header sits at the
+    /// start of the envelope (`Q2FA1:<frame index>/<frame count>:`), and its length is
+    /// `8 + digits(frame index) + digits(frame count)`:
     ///
     /// | Frame count | Longest frame header | Longer than a single frame (`1/1`) |
     /// |-------------|----------------------|------------------------------------|

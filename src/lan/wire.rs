@@ -34,16 +34,11 @@
 //! | endpoint key | [`EndpointKey`] (32 bytes) | the identity the transport connects with, **proven by the handshake** |
 //! | port | `u16` | which port to connect to |
 //!
-//! # Why the length is fixed
+//! The fixed length leaves the parser exactly one shape — "reject if the length is wrong" —
+//! with no variable-length parsing anywhere, and variable-length parsing is what input can
+//! steer. Adding a field therefore requires a new version number.
 //!
-//! A fixed length gives the parser exactly one shape — "reject if the length is wrong" — with
-//! no variable-length parsing anywhere, and variable-length parsing is what input can steer.
-//! The cost is that adding a field requires a new version number.
-//!
-//! # Why two identity fields instead of one
-//!
-//! The device id and the endpoint key are **not the same thing**, and conflating them loses
-//! authentication:
+//! The device id and the endpoint key are **two distinct identities**:
 //!
 //! - [`DeviceId`] is the SHA-256 of the device identity public key (P-256, the one in the
 //!   platform hardware keystore). It is the identity **the user sees**, and the value in the
@@ -59,13 +54,11 @@
 //! whose two identities disagree must be dropped, and that is an explicit check rather than an
 //! understanding.
 //!
-//! # Why announcements are not signed
-//!
-//! Announcements are unsigned. The announce interval is 30 seconds, so signing every one of
-//! them would wake the hardware keystore twice a minute, while a forged announcement achieves
-//! only that the receiver opens a connection — and that connection fails in the handshake,
-//! because the spoofer cannot produce the endpoint private key.
-//! **Discovery may be unauthenticated; credentials must come from the channel.**
+//! Announcements are unsigned: the announce interval is 30 seconds, and signing every one of
+//! them would wake the hardware keystore twice a minute. A forged announcement makes the
+//! receiver open a connection, and that connection fails in the handshake because the spoofer
+//! cannot produce the endpoint private key. **Discovery may be unauthenticated; credentials
+//! must come from the channel.**
 
 use qualia_dik::{DEVICE_ID_LEN, DeviceId};
 
