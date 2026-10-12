@@ -13,25 +13,29 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with this library; if not, see <https://www.gnu.org/licenses/>.
 
-//! fuzz 目标：动态二维码的拆帧与拼装。
+//! Fuzz target: framing and reassembly of dynamic QR codes.
 //!
-//! # 为什么它需要单独一个目标
+//! # Input surface
 //!
-//! [`envelope::decode`] 那条路是**无状态**的：一行文本进来，一份字节或一个错误出去。
-//! 拼装器是**有状态**的，而状态机是「先扫了 A 的第 1 帧、再扫 B 的第 2 帧」这类
-//! 序列才能走到的地方——单条输入的 fuzz 永远覆盖不到。因此本目标把输入**切成若干
-//! 段**，逐段喂给同一个拼装器，段与段之间共享状态。
+//! [`envelope::decode`] is **stateless**: one line of text in, one payload or one error out.
+//! The reassembler is **stateful**, and its state machine is only reached by sequences such as
+//! "scan frame 1 of A, then frame 2 of B", which a single-input fuzz target never produces.
+//! This target therefore **cuts the input into chunks** and feeds them one by one to the same
+//! reassembler, with state shared across chunks. Every chunk is fed both as text (which goes
+//! through Base32 decoding) and as an already decoded frame (which skips parsing).
 //!
-//! # 要保证的性质
+//! # Properties
 //!
-//! 1. **绝不 panic**——包括拼装器里那些按帧号索引的地方。
-//! 2. **报错时状态不变**——用户扫错一张之后，正确的那张还必须能扫进去。这条性质
-//!    靠「出错前后 `received` 与 `missing` 都不变」来验。
-//! 3. **拼齐之后的结果必须与帧内容一致**——把收到的帧按帧号排好接起来，必须等于
-//!    拼装器交回的那份字节。这条是本目标最有价值的一条：它盯的是**顺序**，而
-//!    「按帧号而不是按到达顺序拼」正是整个模块存在的理由。
-//! 4. **拆帧再拼装必须还原**——凡是我们自己拆出来的帧，都必须能被拼回来。这条把
-//!    输入端（`encode_frames`）也纳入了同一次验证。
+//! 1. **Never panics** — including the places inside the reassembler that index by frame number.
+//! 2. **A rejected frame leaves the state unchanged** — after a user scans the wrong code, the
+//!    right one must still be accepted. This property is verified by "`received` and `missing`
+//!    are unchanged before and after the error".
+//! 3. **The assembled result matches the frame contents** — the accepted frames ordered by frame
+//!    number and concatenated must equal the bytes the reassembler hands back. This is the most
+//!    valuable property of this target: it watches **order**, and ordering by frame number
+//!    rather than by arrival is what the whole module exists for.
+//! 4. **Framing then reassembly round-trips** — whatever this crate splits must reassemble. This
+//!    also brings the producing side (`encode_frames`) into the same check.
 
 #![no_main]
 
@@ -39,7 +43,8 @@ use libfuzzer_sys::fuzz_target;
 use qualia_transport::envelope;
 use qualia_transport::frame::{self, Frame, Reassembler};
 
-/// 一次 fuzz 里最多喂多少帧。取小一点，让每个输入都能跑到状态机的深处。
+/// Maximum number of frames fed in one fuzz run. Kept small so that every input reaches deep
+/// into the state machine.
 const MAX_FRAMES: usize = 8;
 
 fuzz_target!(|data: &[u8]| {
@@ -47,12 +52,13 @@ fuzz_target!(|data: &[u8]| {
     check_roundtrip(data);
 });
 
-/// ① 把输入切成若干段，逐段喂给同一个拼装器，核对状态机的性质。
+/// ① Cut the input into chunks, feed them one by one to the same reassembler, and check the
+/// properties of the state machine.
 fn check_reassembly(data: &[u8]) {
     if data.is_empty() {
         return;
     }
-    let capacity = usize::from(data[0]); // 0 表示「容量未知」，是合法输入
+    let capacity = usize::from(data[0]);
     let body = &data[1..];
 
     let mut reassembler = Reassembler::new(capacity);
@@ -60,13 +66,10 @@ fn check_reassembly(data: &[u8]) {
     let mut last_received = 0_usize;
 
     for (round, byte) in body.iter().enumerate().take(MAX_FRAMES) {
-        // 每一轮从**剩余输入**里取一段，段长由当前字节决定。这样同一份输入可以同时
-        // 表达「一条完整的码」与「一串畸形字节」。
         let start = round;
         let end = start.saturating_add(usize::from(*byte)).min(body.len());
         let chunk = &body[start..end];
 
-        // 两种喂法都要走：文本（会经过 Base32 解码）与已经解好的帧（跳过解析）。
         if let Ok(text) = core::str::from_utf8(chunk) {
             let _ = reassembler.push(text);
         }
@@ -89,11 +92,6 @@ fn check_reassembly(data: &[u8]) {
             }
         }
 
-        // 性质：状态只会**单调增长**。
-        //
-        // 这条比「报错时状态不变」弱，但它对两种喂法都成立，而不变量本身是对的：
-        // 一条被拒的帧不该让已经收到的帧消失（那正是 `check_consistent` 必须在写入
-        // 状态**之前**做的理由）。
         assert!(
             reassembler.received() >= last_received,
             "收到的张数减少了：{last_received} → {}",
@@ -108,7 +106,6 @@ fn check_reassembly(data: &[u8]) {
         }
     }
 
-    // 全收齐时，`missing` 必须是空的；没收齐时不能是空的。
     if let Some(total) = reassembler.expected_frames()
         && reassembler.received() == total as usize
     {
@@ -120,12 +117,11 @@ fn check_reassembly(data: &[u8]) {
     }
 }
 
-/// ② 拆帧再拼装必须还原，且**容量未知时也能拼回来**。
+/// ② Frames must reassemble back into the payload, including when the **capacity is unknown**.
 fn check_roundtrip(data: &[u8]) {
     if data.len() < 2 {
         return;
     }
-    // 容量控制在能覆盖 1..=8 帧的范围内（见 `MAX_FRAMES`）。
     let capacity = usize::from(data[0]) % 16 + 1;
     let payload = &data[1..];
     if payload.len() > capacity * MAX_FRAMES {
@@ -137,7 +133,6 @@ fn check_roundtrip(data: &[u8]) {
     };
     assert!(frames.len() <= envelope::MAX_FRAMES as usize);
 
-    // 容量已知时拼回来。
     let mut reassembler = Reassembler::new(capacity);
     let mut done = None;
     for text in &frames {
@@ -149,7 +144,6 @@ fn check_roundtrip(data: &[u8]) {
         "拆帧往返不一致（容量已知）"
     );
 
-    // 容量未知时也拼回来——这是平台相机那条路的形态。
     let mut reassembler = Reassembler::from_first_frame();
     let mut done = None;
     for text in frames.iter().rev() {
@@ -164,23 +158,20 @@ fn check_roundtrip(data: &[u8]) {
     );
 }
 
-/// 拼齐之后，交回的字节必须等于「按帧号排好接起来」。
+/// Once complete, the bytes handed back must equal the frames ordered by frame number and
+/// concatenated.
 ///
-/// 这条盯的是**顺序**：按到达顺序拼会在乱序扫描时悄悄产出另一份字节，而它看起来
-/// 完全正常——载荷层的 AEAD 只会说「解密失败」。
+/// This watches **order**: assembling by arrival order silently yields different bytes when the
+/// codes are scanned out of order, and the result looks perfectly normal — the payload layer's
+/// AEAD only reports a failed decryption.
 fn check_assembled(reassembler: &Reassembler, accepted: &[(u32, u32, Vec<u8>)], bytes: &[u8]) {
     let total = reassembler.expected_frames().expect("拼齐了就有总数");
     let mut expected = Vec::new();
     for index in 1..=total {
-        // 连 `total` 一起匹配：同一个 fuzz 输入里可能先后凑齐过**两份**载荷，而
-        // 它们的帧号会重叠。只按帧号找会拿到上一份的那一帧。
         let Some((_, _, payload)) = accepted
             .iter()
             .find(|(at, count, _)| *at == index && *count == total)
         else {
-            // 还有帧没被收下（`accepted` 只记录被收下的），说明这次 `done` 不是由
-            // 这一轮的帧凑齐的——那不可能，因为 `done` 只在 `received == total` 时
-            // 非空。真出现的话，这条 panic 正好暴露。
             panic!("拼齐了却找不到第 {index} 帧（总数 {total}）");
         };
         expected.extend_from_slice(payload);

@@ -13,107 +13,117 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with this library; if not, see <https://www.gnu.org/licenses/>.
 
-//! 局域网通道（QWBP）：在同一网段上找到对端，再把字节送过去。
+//! LAN channel (QWBP): find peers on the same network segment, then move bytes to them.
 //!
-//! # 分成两半，各自解决一件事
+//! # Two halves, each solving one problem
 //!
-//! | 模块 | 干什么 | 靠什么 |
-//! |------|--------|--------|
-//! | [`lobby`] | 发现：谁在这个网段上、去哪里连他 | UDP 组播，无认证 |
-//! | *传输* | 搬运：把整份同步载荷送过去 | QUIC（见 `lan` 之外的传输实现） |
+//! | Module | Role | Mechanism |
+//! |--------|------|-----------|
+//! | [`lobby`] | Discovery: who is on this segment, and where to reach them | UDP multicast to `239.255.81.65:21377`, unauthenticated |
+//! | *transport* | Carriage: move a whole sync payload to a peer | QUIC over an offline iroh configuration, behind the `iroh-lan` feature |
 //!
-//! 这两半的分界不是「哪个先做」，而是**信任级别**：组播是共享介质，任何人都能往里
-//! 灌任意字节，因此它承载的信息只能是**提示**——「这个网段上大概有谁」。真正的身份
-//! 由建立连接时的握手证明，而「这条载荷该不该收」由核心库的白名单决定
-//! （`qualia2fa_core::transport::SyncSession::restricted`）。
+//! The dividing line is not "which half runs first" but the **trust level**: multicast is a
+//! shared medium, so anyone can inject arbitrary bytes into it, and the information it
+//! carries can only be a **hint** — "somebody is probably on this segment". Real identity is
+//! proven by the handshake that establishes the connection, and whether a payload may be
+//! accepted is decided by the core library's allow list
+//! (`qualia2fa_core::transport::SyncSession::restricted`).
 //!
-//! # 为什么发现不做认证
+//! # Discovery is unauthenticated
 //!
-//! 想过给公告签名（用平台硬件密钥库里的设备身份私钥）。放弃的理由是**代价与收益
-//! 不成比例**：公告是周期性的，签名意味着 TPM 每个周期被唤醒一次；而伪造公告能换来
-//! 的只是「让对端发起一次连接」，那次连接会在握手里暴露出伪造者拿不出端点私钥。
+//! An announcement is not signed: a forged one can only make the receiver open a connection,
+//! and that connection fails in the handshake because the spoofer cannot produce the endpoint
+//! private key. Signing every announcement would mean waking the hardware keystore every
+//! cycle to defend against an attack the connection layer already stops.
+//! **Discovery may be unauthenticated; credentials must come from the channel.**
 //!
-//! 这正是 D4 在局域网上的翻版：**发现可以无认证，凭据必须来自信道。**
+//! # The QR-code route to a connection
 //!
-//! # 用二维码「建链」的那条路
+//! Multicast requires both ends in the **same broadcast domain**. Across segments, or where
+//! network policy forbids multicast, there is another route: [`LanAddress`] is carried
+//! out-of-band inside a QR code (the core library's `SharePlan::LinkEstablishment` case) and
+//! the receiver dials it directly. Both routes produce the **same kind of connection**, so
+//! the protocol layer does not need to know which one the user took.
 //!
-//! 组播要求两端在**同一个广播域**里。跨网段、或者网络策略禁止组播时，还有一条路：
-//! 把 [`LanAddress`] 编码进二维码带外传过去（那是 `SharePlan::LinkEstablishment`
-//! 的场景），对端据此直接建连。两条路产生的是**同一种连接**，因此协议层不需要知道
-//! 用户走的是哪一条。
+//! # Purity
 //!
-//! # 本模块的纯度
-//!
-//! [`wire`] 是纯逻辑：不碰 socket、不读时钟，全部输入都是参数，因此「三台设备收敛到
-//! 同一份视图」这类性质可以在一个进程里、不需要网络地验证。
-//! [`lobby`] 是唯一碰 I/O 的地方，而它里面的判断被压到最小——判断都在 [`wire`] 里。
+//! [`wire`] is pure logic: no sockets, no clock, every input is a parameter, so properties
+//! such as "three devices converge on one view" can be verified inside a single process with
+//! no network. [`lobby`] is the only place that touches I/O, and the reasoning inside it is
+//! kept to a minimum — the decisions live in [`wire`].
 
 pub mod lobby;
 pub mod wire;
 
-/// 局域网的数据面（iroh 的离线配置）。
+/// The LAN data plane (an offline iroh configuration).
 ///
-/// 它整体挂在一个 feature 后面：iroh 会带进两百多个 crate 与一套 tokio 运行时，而
-/// **二维码那条路只需要一个二维码编码器**。移动端先用二维码（平台相机拿到的已经是
-/// 文本），桌面端再打开这一半——把这条分界线做在 feature 上，比做在文档里可靠。
+/// The whole module sits behind a feature: iroh pulls in over two hundred crates and a tokio
+/// runtime, while the QR-code route needs only a QR encoder. Mobile builds use the QR route
+/// first (the platform camera already hands back text) and desktop builds enable this half;
+/// making that boundary a feature rather than a documentation note keeps it enforced.
 #[cfg(feature = "iroh-lan")]
 pub mod transport;
 
 use crate::error::{Error, Result};
 use wire::EndpointKey;
 
-/// 局域网连接信息在二维码里用的前缀。
+/// Prefix that marks LAN connection information inside a QR code.
 ///
-/// 与二维码信封的 `Q2FA1` **不是**同一个东西：信封说的是「这段文本怎么装进二维码」，
-/// 而这里说的是「文本里装的是什么」。分两层是因为同一条信封还要承载别的载荷（配对
-/// 引导数据、同步载荷本身），而那些载荷不该长得像一条局域网地址。
+/// Not the same thing as the QR envelope's `Q2FA1`: the envelope says how a piece of text
+/// travels inside a QR code, this says what the text contains. The two layers are separate
+/// because the same envelope also carries other payloads (pairing bootstrap data, sync
+/// payloads), and those must not look like a LAN address.
 const ADDRESS_PREFIX: &[u8; 6] = b"Q2FAL1";
 
-/// 局域网连接信息的版本。
+/// Version of the LAN connection information layout.
 const ADDRESS_VERSION: u8 = 1;
 
-/// 局域网连接信息的固定长度。
+/// Fixed length of the LAN connection information, in bytes.
 ///
-/// 前缀 6 + 版本 1 + 端点公钥 32 + 端口 2 + 校验 1。
+/// Prefix 6 + version 1 + endpoint key 32 + port 2 + checksum 1.
 pub const ADDRESS_LEN: usize = ADDRESS_PREFIX.len() + 1 + wire::ENDPOINT_KEY_LEN + 2 + 1;
 
-/// **一条可以直接拨号的局域网连接信息。**
+/// A LAN connection record that can be dialed directly.
 ///
-/// # 它为什么存在
+/// # What it is for
 ///
-/// 组播大厅要求两端在同一个广播域里。跨网段（用户的两台设备连着不同的 AP）、或者
-/// 网络策略禁止组播（很多企业 WiFi 就是）时，唯一的路是把「去哪里连我」**带外**交给
-/// 对方——也就是二维码。这就是 D9 的「建链」模式，而它是 [`LanAddress`] 的全部用途。
+/// The multicast lobby requires both ends in the same broadcast domain. Across segments (the
+/// user's two devices on different access points), or where network policy forbids multicast
+/// (many corporate WiFi networks), the only route is to hand "where to connect to me" to the
+/// peer **out-of-band** — a QR code. That is the core library's link-establishment mode, and
+/// it is the entire purpose of [`LanAddress`].
 ///
-/// # 为什么它比组播公告**短**
+/// # It is shorter than a multicast announcement
 ///
-/// 公告里同时带设备标识（32 字节）与端点公钥（32 字节），因为组播上的接收方需要
-/// 设备标识才能做白名单。而这条信息是**带外**送达的：拿到二维码的人已经在配对流程
-/// 里确认过对方的身份了，设备标识由那条流程提供。省掉 32 字节在二维码上是实打实的
-/// 容量。
+/// An announcement carries both the device id (32 bytes) and the endpoint key (32 bytes),
+/// because a multicast receiver needs the device id for its allow list. This record is
+/// delivered **out-of-band**: whoever scans the QR code has already confirmed the peer's
+/// identity during pairing, and that flow supplies the device id. Leaving out those 32 bytes
+/// is real QR capacity: 42 bytes here against 84 for an announcement.
 ///
-/// # 校验
+/// # Checksum
 ///
-/// 末字节是 8 位和校验。它**不是**安全措施——这条信息本来就不承担保密与认证职责
-/// （见模块文档）。它只防一件事：**用户手抄或肉眼核对时抄错一位**。没有它的话，
-/// 一个抄错的端口会让对端去连一个不存在的端口，而报出来的是「连接超时」——一个把
-/// 诊断引向网络问题、而不是「码抄错了」的方向。
+/// The last byte is an 8-bit sum. It is **not** a security measure — this record carries no
+/// confidentiality or authentication duty (see the module documentation). It catches one
+/// thing: **a digit copied or read off wrongly by a human**. Without it, a mistyped port sends
+/// the peer to a port nobody listens on, and the failure surfaces as a connection timeout
+/// rather than as "the code was copied wrong".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LanAddress {
-    /// 对端的传输层端点公钥。
+    /// The peer's transport endpoint public key.
     pub endpoint_key: EndpointKey,
-    /// 对端监听的端口。
+    /// The port the peer listens on.
     pub port: u16,
 }
 
 impl LanAddress {
-    /// 造一条连接信息。
+    /// Builds a connection record.
     #[must_use]
     pub const fn new(endpoint_key: EndpointKey, port: u16) -> Self {
         Self { endpoint_key, port }
     }
 
-    /// 编码成 [`ADDRESS_LEN`] 字节。
+    /// Encodes into [`ADDRESS_LEN`] bytes.
     #[must_use]
     pub fn encode(&self) -> [u8; ADDRESS_LEN] {
         let mut out = [0_u8; ADDRESS_LEN];
@@ -130,18 +140,21 @@ impl LanAddress {
         out
     }
 
-    /// 从一段字节解出一条连接信息。
+    /// Parses one connection record out of a byte slice.
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// - [`Error::NotOurLanAddress`]：前缀不对（这不是一条局域网连接信息）。
-    /// - [`Error::UnsupportedDatagramVersion`]：前缀对，但版本比本机新。它借用了大厅
-    ///   报文的那个变体，因为两者是同一件事：**是我们的东西，只是比本机新**。混进
-    ///   「不是我们的」会让将来升级时不认识的东西被静默丢掉。
-    /// - [`Error::BadLanAddressLength`]：长度不对。
-    /// - [`Error::ZeroPort`]：端口为 0。
-    /// - [`Error::MalformedFrameHeader`]：校验字节对不上（多半是抄错了）。它借用了
-    ///   二维码信封的那个变体，理由同上：都是「格式对、内容坏了」。
+    /// - [`Error::NotOurLanAddress`]: the prefix does not match, so this is not LAN connection
+    ///   information.
+    /// - [`Error::UnsupportedDatagramVersion`]: the prefix matches but the version is newer
+    ///   than this build. It reuses the lobby datagram variant because it is the same
+    ///   situation: **ours, but newer than this build**. Reporting it as "not ours" would make
+    ///   anything a future version introduces get dropped silently.
+    /// - [`Error::BadLanAddressLength`]: the length is wrong.
+    /// - [`Error::ZeroPort`]: the port is 0.
+    /// - [`Error::MalformedFrameHeader`]: the checksum byte does not match, which in practice
+    ///   means a copy error. It reuses the QR envelope variant for the same reason as above:
+    ///   the format is right, the contents are broken.
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let prefix = bytes
             .get(..ADDRESS_PREFIX.len())
@@ -182,11 +195,12 @@ impl LanAddress {
     }
 }
 
-/// 8 位和校验。
+/// 8-bit sum checksum.
 ///
-/// 取的是**字节和**而不是 CRC 之类：它要挡的是抄错一位，而不是随机损坏——后者在这个
-/// 场景里不存在（同一串字节不是被抄就是没被抄）。而它必须足够简单，简单到可以在一张
-/// 纸上心算出来，这样「用户对着照片核对」这件事才有意义。
+/// A **byte sum** rather than a CRC: what it must catch is one digit transcribed wrongly by a
+/// user, not random corruption (the same string of bytes is either copied or it is not), and
+/// it has to stay simple enough to re-add by hand from a photograph. Every covered byte is
+/// added with wrapping arithmetic over `u8`.
 fn checksum(bytes: &[u8]) -> u8 {
     bytes.iter().fold(0_u8, |acc, byte| acc.wrapping_add(*byte))
 }
@@ -199,10 +213,13 @@ mod tests {
         EndpointKey::from_bytes([seed; 32])
     }
 
-    /// **线格式必须逐字节钉住。**
+    /// The wire format is pinned byte for byte.
     ///
-    /// 手写期望值而不是编解码互相对照，理由与大厅报文那一条相同：互相对照只能证明
-    /// 自洽，对「两边一起改错」完全盲。
+    /// Every field, the big-endian port, and the checksum byte are asserted against expected
+    /// values written out by hand rather than produced by encoding and decoding: a round trip
+    /// proves only that the two halves agree with each other, and is blind to both of them
+    /// drifting together. The expected checksum is summed from the covered range instead of
+    /// being hardcoded, so the assertion cannot stay green after the format changes.
     #[test]
     fn wire_format_is_pinned() {
         let address = LanAddress::new(EndpointKey::from_bytes([0xBB; 32]), 0x1234);
@@ -217,9 +234,6 @@ mod tests {
         assert_eq!(bytes[6], 1, "版本");
         assert_eq!(&bytes[7..39], &[0xBB; 32], "端点公钥");
         assert_eq!(&bytes[39..41], &[0x12, 0x34], "端口是大端");
-        // 被校验覆盖的那一段的字节和：前缀 6 字节的 ASCII、版本 1、公钥 32×0xBB、
-        // 端口 0x12 + 0x34。逐项算出来而不是抄一个数字——抄的那个数字不会随格式
-        // 变化，于是这条断言会在格式改了之后继续绿。
         let expected = b'Q'
             .wrapping_add(b'2')
             .wrapping_add(b'F')
@@ -247,7 +261,7 @@ mod tests {
         }
     }
 
-    /// 别的数据必须被报成「不是我们的」，而不是「我们的但坏了」。
+    /// Foreign bytes must be reported as "not ours", never as "ours but broken".
     #[test]
     fn foreign_bytes_are_recognized_as_foreign() {
         for bytes in [
@@ -263,7 +277,7 @@ mod tests {
         }
     }
 
-    /// 前缀对了之后，每一处不合规都要分开报。
+    /// Once the prefix matches, every kind of nonconforming input gets its own error.
     #[test]
     fn our_bytes_are_diagnosed_precisely() {
         let good = LanAddress::new(endpoint(1), 1234).encode();
@@ -286,7 +300,6 @@ mod tests {
         );
         assert!(is_version, "应当报版本比本机新，实际 {result:?}");
 
-        // 改坏一个字节：校验必须抓到。
         let mut corrupted = good;
         corrupted[10] ^= 0x01;
         let result = LanAddress::decode(&corrupted);
@@ -294,17 +307,15 @@ mod tests {
         assert!(is_checksum, "抄错的字节应当被校验抓到，实际 {result:?}");
     }
 
-    /// **校验必须对每一位都敏感。**
+    /// The checksum must be sensitive to every covered bit.
     ///
-    /// 一条「只在高位字节上出错才报」的校验是很容易写出来的（比如把 `u8` 的溢出当成
-    /// 正常回绕，却忘了把某一段算进去）。这里逐字节翻一位试一遍——那正是用户抄错时
-    /// 会发生的事。
+    /// Every single-bit flip in the range the checksum covers (bytes `7..ADDRESS_LEN - 1`)
+    /// must be caught. The prefix and the version byte have their own earlier checks and
+    /// report other errors, which is correct but is not what this test is about.
     #[test]
     fn every_single_bit_flip_is_caught() {
         let good = LanAddress::new(endpoint(0x5A), 21_377).encode();
 
-        // 只翻「被校验覆盖的那一段」里的位。前缀与版本有各自的前置检查，翻它们会报
-        // 别的错误，那也是对的——但这里要盯的是校验本身。
         for index in 7..(ADDRESS_LEN - 1) {
             for bit in 0..8 {
                 let mut corrupted = good;
@@ -318,14 +329,14 @@ mod tests {
         }
     }
 
-    /// 端口 0 必须被拒绝。
+    /// Port 0 is rejected.
     ///
-    /// 端口 0 在 socket API 里表示「由系统挑一个」，而一条**已经建立好的**连接信息里
-    /// 出现它，只能意味着对端为了构造它而写错了东西——拿到它的设备会去连一个不存在
-    /// 的端口。
+    /// Port 0 means "let the system pick one" in the socket API; in a record that is already
+    /// complete it can only be an error on the sender's side, and a device that dialed it
+    /// would try a port nobody listens on. The record is built by hand with a correct
+    /// checksum, so the checksum check cannot mask the port check.
     #[test]
     fn a_zero_port_is_rejected() {
-        // 手工构造：把端口写成 0 再补上正确的校验，绕过「校验先挡下来」那条路。
         let mut bytes = LanAddress::new(endpoint(1), 1234).encode();
         bytes[39] = 0;
         bytes[40] = 0;
@@ -337,7 +348,10 @@ mod tests {
         assert!(is_zero, "应当报端口为 0，实际 {result:?}");
     }
 
-    /// 任意字节都不得让解析器 panic，也不得让它接受。
+    /// No input may make the parser panic, and no input may make it accept a record.
+    ///
+    /// Every length from 0 to `ADDRESS_LEN + 4` and four fill patterns are tried; one of the
+    /// patterns gets a real prefix so that parsing reaches deeper paths.
     #[test]
     fn arbitrary_bytes_never_panic() {
         for length in 0..=(ADDRESS_LEN + 4) {

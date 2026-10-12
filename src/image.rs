@@ -13,47 +13,52 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with this library; if not, see <https://www.gnu.org/licenses/>.
 
-//! 灰度图像：渲染与扫描之间传递像素的形式。
+//! Grayscale images: the form in which pixels are passed between rendering and scanning.
 //!
-//! # 边界画在「像素」上，不画在「图片文件」上
+//! # The boundary is drawn at pixels, not at image files
 //!
-//! 「从图片导入二维码」这条路径上，用户给的是一个 PNG/JPEG 文件。把它解成像素是
-//! **平台已经会做的事**：JVM 有 `ImageIO`，Android 有 `BitmapFactory`，iOS 有
-//! `UIImage`。若本 crate 自己解，就要引入一个图像格式 crate、为每个平台维护一份
-//! 解码器，并把那些解码器历史上的漏洞一并收进来（图像解码器是 CVE 的常客）。
+//! On the "import a QR code from an image" path the user supplies a PNG/JPEG file. Turning it
+//! into pixels is **something the platform already does**: the JVM has `ImageIO`, Android has
+//! `BitmapFactory`, iOS has `UIImage`. Decoding it here would require an image format crate, a
+//! decoder maintained for every platform, and would import the historical vulnerabilities of
+//! those decoders (image decoders are a frequent source of CVEs).
 //!
-//! 因此本 crate 只认像素：**格式归平台，二维码归本 crate**。
+//! This crate therefore accepts pixels only: **the format belongs to the platform, the QR code
+//! belongs to this crate**.
 
 use crate::error::{Error, Result};
 
-/// 8 位灰度图：行优先、`0` 是黑、`255` 是白。
+/// An 8-bit grayscale image: row-major, `0` is black, `255` is white.
 ///
-/// 尺寸与像素数必须自洽——这是本类型唯一的不变式，也是唯一能构造它的入口替你保证的
-/// 事。二维码的定位算法会在图上做索引与插值，一个「声称 1000×1000 却有 10 个像素」
-/// 的图像会让它在别的层里越界。
+/// The dimensions and the pixel count must agree — the only invariant of this type, and the
+/// only thing the sole constructor guarantees. The QR localization algorithm indexes and
+/// interpolates into the image, so an image claiming 1000×1000 with 10 pixels would make it
+/// run out of bounds in other layers.
 pub struct GrayImage {
-    /// 宽度（像素）。
+    /// Width, in pixels.
     width: u32,
-    /// 高度（像素）。
+    /// Height, in pixels.
     height: u32,
-    /// 行优先的灰度值，长度恒为 `width * height`。
+    /// Row-major grayscale values, always `width * height` long.
     pixels: Vec<u8>,
 }
 
 impl GrayImage {
-    /// 单张图像的像素数上限：64 Mi 像素（约 64 MB 灰度数据）。
+    /// Pixel limit for a single image: 64 Mi pixels (about 64 MB of grayscale data).
     ///
-    /// 这不是密码学边界，而是**工作量边界**：二维码识别不需要原始分辨率，端侧应当先
-    /// 把长边缩到一两千像素再送进来。上限存在的意义是让「端侧忘了缩」这件事表现为
-    /// 一个明确的错误，而不是一次几百 MB 的分配。
+    /// This is not a cryptographic boundary but a **work boundary**: QR detection does not
+    /// need the original resolution, and the platform side should scale the long edge down to
+    /// one or two thousand pixels before handing the image over. The limit exists so that a
+    /// forgotten downscale shows up as an explicit error instead of an allocation of several
+    /// hundred megabytes.
     pub const MAX_PIXELS: usize = 64 * 1024 * 1024;
 
-    /// 从灰度像素构造。
+    /// Constructs from grayscale pixels.
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// 宽或高为 0、像素个数与 `width * height` 不符、或超过
-    /// [`GrayImage::MAX_PIXELS`] 时返回 [`Error::BadImageGeometry`]。
+    /// Returns [`Error::BadImageGeometry`] if the width or the height is 0, if the pixel count
+    /// does not match `width * height`, or if it exceeds [`GrayImage::MAX_PIXELS`].
     pub fn from_luma8(width: u32, height: u32, pixels: Vec<u8>) -> Result<Self> {
         let expected = image_size(width, height, pixels.len())?;
         if expected != pixels.len() {
@@ -70,13 +75,16 @@ impl GrayImage {
         })
     }
 
-    /// 从 RGBA 像素构造（丢掉 alpha）。
+    /// Constructs from RGBA pixels (alpha is dropped).
     ///
-    /// 亮度用 Rec.601 的定点近似 `(77·R + 150·G + 29·B) / 256`——三个权重之和恰好是
-    /// 256，因此结果是精确的 8 位亮度，不需要再做夹取。
+    /// Luma uses the Rec.601 fixed-point approximation `(77·R + 150·G + 29·B) / 256` — the
+    /// three weights sum to exactly 256, so the result is an exact 8-bit luma and needs no
+    /// clamping.
     ///
-    /// **alpha 被丢掉而不是参与合成**：把透明背景合成成黑色或白色都需要一个背景色
-    /// 假设，而二维码的定位算法自己会做自适应阈值——它比我们更清楚前景是什么。
+    /// **Alpha is dropped rather than composited**: compositing a transparent background onto
+    /// black or white would require assuming a background colour, while the QR localization
+    /// algorithm does its own adaptive thresholding — it knows the foreground better than we
+    /// do.
     pub fn from_rgba8(width: u32, height: u32, pixels: &[u8]) -> Result<Self> {
         let expected = image_size(width, height, pixels.len())?;
         let Some(expected_bytes) = expected.checked_mul(4) else {
@@ -109,25 +117,25 @@ impl GrayImage {
         })
     }
 
-    /// 宽度（像素）。
+    /// Width, in pixels.
     #[must_use]
     pub const fn width(&self) -> u32 {
         self.width
     }
 
-    /// 高度（像素）。
+    /// Height, in pixels.
     #[must_use]
     pub const fn height(&self) -> u32 {
         self.height
     }
 
-    /// 行优先的灰度值。
+    /// The row-major grayscale values.
     #[must_use]
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
     }
 
-    /// 取一个像素；越界返回 `None`。
+    /// Returns one pixel; out of bounds yields `None`.
     #[must_use]
     pub fn pixel(&self, x: u32, y: u32) -> Option<u8> {
         if x >= self.width || y >= self.height {
@@ -136,18 +144,19 @@ impl GrayImage {
         self.at(x as usize, y as usize).into()
     }
 
-    /// 内部的无检查取值：越界返回白色。
+    /// Unchecked internal read: out of bounds yields white.
     ///
-    /// 调用方都保证坐标在界内（渲染时由构造过程保证，扫描时由解码器的 `width()` /
-    /// `height()` 保证）。返回白色而不是 panic，是为了让「万一越界」表现为一张扫不出
-    /// 东西的图，而不是一次崩溃——本 crate 的任何输入都不得导致 panic。
+    /// All callers guarantee that the coordinates are in bounds (rendering by the construction
+    /// process, scanning by the decoder's `width()` / `height()`). Returning white instead of
+    /// panicking makes a hypothetical out-of-bounds read show up as an image nothing can be
+    /// scanned from, rather than a crash — no input to this crate may cause a panic.
     pub(crate) fn at(&self, x: usize, y: usize) -> u8 {
         let index = y * (self.width as usize) + x;
         self.pixels.get(index).copied().unwrap_or(u8::MAX)
     }
 }
 
-/// 校验尺寸并算出应有多少像素。
+/// Validates the dimensions and computes how many pixels there should be.
 fn image_size(width: u32, height: u32, actual: usize) -> Result<usize> {
     let bad = || Error::BadImageGeometry {
         width,
@@ -167,10 +176,11 @@ fn image_size(width: u32, height: u32, actual: usize) -> Result<usize> {
 }
 
 impl core::fmt::Debug for GrayImage {
-    /// 只打印尺寸。
+    /// Prints the dimensions only.
     ///
-    /// 一张 4000×3000 的图的像素数是 1200 万，`derive(Debug)` 会把它整份倒进日志
-    /// ——那既没用（谁看得懂灰度数组），又把日志变成一个内存放大点。
+    /// A 4000×3000 image has 12 million pixels, and `derive(Debug)` would pour all of them
+    /// into the log — useless (who reads a grayscale array) and a memory amplification point
+    /// for the log.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
@@ -202,13 +212,11 @@ mod tests {
         assert!(GrayImage::from_luma8(2, 2, vec![0, 1, 2]).is_err());
         assert!(GrayImage::from_luma8(0, 2, vec![]).is_err());
         assert!(GrayImage::from_luma8(2, 0, vec![]).is_err());
-        // 宽×高必须用 checked 乘法：u32 的乘积在这里能溢出。
         assert!(GrayImage::from_luma8(u32::MAX, u32::MAX, vec![0]).is_err());
     }
 
     #[test]
     fn rgba_converts_to_luma() {
-        // 纯黑、纯白、纯红、纯绿。
         let pixels = vec![
             0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0, 255, 0, 255, 0, 255,
         ];

@@ -13,13 +13,14 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with this library; if not, see <https://www.gnu.org/licenses/>.
 
-//! 端到端闭环：载荷 → 二维码 → 像素 → 载荷。
+//! End-to-end loop: payload → QR code → pixels → payload.
 //!
-//! 这些测试走的是**用户真正走的那条路**：把码画成图，再从图里读回来。只测
-//! 「编码器不报错」是不够的——那证明不了画出来的东西扫得出来，而扫不出来的码对用户
-//! 来说与没生成过没有区别。
+//! These tests walk **the path a user really walks**: render the code into an image, then read
+//! it back out of that image. Testing only "the encoder reports no error" is not enough — that
+//! does not prove the rendered code can be scanned, and a code that cannot be scanned is, to
+//! the user, the same as one that was never generated.
 //!
-//! 图像解码是可选 feature，因此整个文件在关闭它时不参与编译。
+//! Image decoding is an optional feature, so this whole file is not compiled when it is off.
 
 #![cfg(feature = "scan-image")]
 
@@ -28,10 +29,11 @@ use qualia_transport::envelope;
 use qualia_transport::image::GrayImage;
 use qualia_transport::qr::{self, EcLevel, QrProfile};
 
-/// 确定性伪随机载荷。
+/// Deterministic pseudo-random payload.
 ///
-/// 刻意不用 `rand`：它是本项目禁用的依赖（`deny.toml`），而且测试需要的是**可复现**，
-/// 不是统计随机性——失败的用例必须能原样重放。
+/// `rand` is deliberately not used: it is a denied dependency of this project (`deny.toml`),
+/// and a test needs **reproducibility** rather than statistical randomness — a failing case
+/// must be replayable as it was.
 fn pseudo_random(len: usize) -> Vec<u8> {
     let mut state: u32 = 0x9e37_79b9;
     let mut out = Vec::with_capacity(len);
@@ -42,7 +44,7 @@ fn pseudo_random(len: usize) -> Vec<u8> {
     out
 }
 
-/// 编码 → 渲染 → 扫描 → 比对。
+/// Encode → render → scan → compare.
 fn round_trip(profile: &QrProfile, len: usize) {
     let payload = pseudo_random(len);
     let symbol = profile
@@ -65,9 +67,11 @@ fn round_trip(profile: &QrProfile, len: usize) {
     assert_eq!(decoded, payload, "读回来的载荷与编进去的不一致");
 }
 
-/// 四种纠错级别 × 从最小到最大的版本：**每一个**都要能画出来又读回来。
+/// Four error-correction levels × versions from the smallest to the largest: **each** one must
+/// render and read back.
 ///
-/// 长度取「1、上限的一半、上限」，正好覆盖三种典型形状：最短、中间、刚好装满。
+/// The lengths are 1, half the capacity and the capacity, covering exactly the three typical
+/// shapes: shortest, mid-size, exactly full.
 #[test]
 fn every_profile_round_trips_through_pixels() {
     let profiles = [
@@ -87,10 +91,11 @@ fn every_profile_round_trips_through_pixels() {
     }
 }
 
-/// 用户导入的往往不是一张「干净」的码：截图里有大片留白、拍摄时有倾斜与背景。
+/// What a user imports is usually not a "clean" code: screenshots have wide margins, photos are
+/// taken at an angle and against a background.
 ///
-/// 这里覆盖最容易复现的那一种——把码贴在一张更大的白底画布上。它验证的是解码器
-/// 走的是**定位**而不是「假设码铺满整张图」。
+/// The easiest shape to reproduce is covered here: a code pasted onto a larger white canvas. It
+/// verifies that the decoder **locates** the code instead of assuming it fills the whole image.
 #[test]
 fn a_code_inside_a_larger_canvas_is_still_found() {
     let profile = QrProfile::new(EcLevel::Medium, 10).expect("版本合法");
@@ -114,11 +119,12 @@ fn a_code_inside_a_larger_canvas_is_still_found() {
     assert_eq!(decoded, payload);
 }
 
-/// 别人的二维码必须被报成「不是我们的码」。
+/// Someone else's QR code must be reported as "not our code".
 ///
-/// 这条测试用的是**另一个编码器**（直接调 `qrcodegen`）与**另一份渲染代码**（本测试
-/// 里手写的那几行）。理由与线格式测试相同：只用自己的编码器加自己的渲染器，验证的是
-/// 自洽性；对「我们对二维码的理解整体偏了」完全盲。
+/// This test uses **another encoder** (calling `qrcodegen` directly) and **another renderer**
+/// (the few lines written by hand below). The reason matches the wire-format tests: our own
+/// encoder plus our own renderer only verify self-consistency and stay blind to a shared
+/// misunderstanding of what a QR code is.
 #[test]
 fn someone_elses_qr_is_reported_as_foreign() {
     let url = "https://example.com/not-ours";
@@ -137,7 +143,7 @@ fn someone_elses_qr_is_reported_as_foreign() {
     );
 }
 
-/// 图里没有码时必须报 [`Error::NoQrFound`]，而不是某个解码器的内部错误。
+/// An image without a code must report [`Error::NoQrFound`], not some decoder-internal error.
 #[test]
 fn a_blank_image_reports_not_found() {
     let blank = GrayImage::from_luma8(200, 200, vec![u8::MAX; 200 * 200]).expect("尺寸自洽");
@@ -150,10 +156,11 @@ fn a_blank_image_reports_not_found() {
     assert!(qr::scan::decode_text(&blank).is_err());
 }
 
-/// 小到几何上不可能含码的图必须被直接拒绝，且不得 panic。
+/// Images too small to geometrically hold a code must be rejected outright, and must not panic.
 ///
-/// 版本 1 的二维码是 21×21 个模块，一个模块至少一个像素——小于 21×21 的图里不可能
-/// 有码。这条测试同时盯住「端侧传了小图」这条路径：它必须是错误，不是崩溃。
+/// A version 1 QR code is 21×21 modules and a module is at least one pixel, so an image smaller
+/// than 21×21 cannot contain a code. This also pins the "the client side passed a tiny image"
+/// path: it must be an error, not a crash.
 #[test]
 fn images_too_small_to_hold_a_qr_are_rejected() {
     for side in [1_u32, 2, 20] {
@@ -171,11 +178,12 @@ fn images_too_small_to_hold_a_qr_are_rejected() {
     }
 }
 
-/// 信封文本必须**整串**落在二维码的字母数字模式里。
+/// Envelope text must fall **entirely** inside the QR alphanumeric mode.
 ///
-/// 这是「用 Base32 而不是 Base64」的**全部理由**（见 `src/base32.rs`）。一旦有人往
-/// 信封里加一个小写字母或下划线，整张码就会退回字节模式，每个载荷字节多花 2 位——
-/// 界面上看不出任何异常，只是码变大了、更难扫了。
+/// That is the constraint behind using Base32 rather than Base64 (see `src/base32.rs`). As soon
+/// as a lowercase letter or an underscore enters the envelope, the whole code falls back to byte
+/// mode and every payload byte costs 2 extra bits — nothing looks wrong in the UI, the code
+/// merely gets bigger and harder to scan.
 #[test]
 fn envelope_text_stays_inside_the_alphanumeric_charset() {
     const ALPHANUMERIC: &str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
@@ -189,7 +197,8 @@ fn envelope_text_stays_inside_the_alphanumeric_charset() {
     }
 }
 
-/// 信封的膨胀必须是有界的：Base32 是 8/5，加上不到 20 个字符的帧头。
+/// Envelope expansion must be bounded: Base32 is 8/5, plus a frame header of fewer than 20
+/// characters.
 #[test]
 fn envelope_overhead_stays_bounded() {
     for len in [16_usize, 256, 1024] {
@@ -203,7 +212,8 @@ fn envelope_overhead_stays_bounded() {
     }
 }
 
-/// 超出上限一个字节就必须报错，且报出的 `needed`/`limit` 都以**载荷字节**为单位。
+/// One byte over the capacity must fail, and the reported `needed`/`limit` are both in **payload
+/// bytes**.
 #[test]
 fn one_byte_over_capacity_is_reported_in_payload_units() {
     let profile = QrProfile::new(EcLevel::Medium, 8).expect("版本合法");
@@ -218,18 +228,19 @@ fn one_byte_over_capacity_is_reported_in_payload_units() {
     }
 }
 
-/// 多帧：拆帧 → 逐张渲染 → 逐张扫描 → 拼装。
+/// Multiple frames: split → render each → scan each → reassemble.
 ///
-/// 这是「桌面端展示、另一端逐张扫」那条真实路径的像素版本。三件事必须同时成立：
-/// 每一张都**画得出来**（容量按最长帧头扣掉那几个字符不是白扣的）、每一张都**读得
-/// 回来**、拼出来的字节与原始载荷一致。
+/// This is the pixel version of the real path where one device displays and another scans the
+/// codes one by one. Three things must hold at the same time: every code **renders** (the
+/// capacity is reduced by the longest frame header for a reason), every code **reads back**,
+/// and the reassembled bytes equal the original payload.
 ///
-/// 扫描顺序刻意用倒序：帧可以乱序到达，而那正是拼装器存在的理由。
+/// The scanning order is deliberately reversed: frames may arrive out of order, which is what
+/// the reassembler exists for.
 #[test]
 fn a_multi_frame_payload_round_trips_through_pixels() {
     let profile = QrProfile::new(EcLevel::Low, 10).expect("版本合法");
     let single = profile.payload_capacity();
-    // 单帧容量多一个字节：一张装不下，两张装得下。
     let payload = pseudo_random(single + 1);
     let symbols = profile
         .encode_payload_frames(&payload, 4)
@@ -261,11 +272,13 @@ fn a_multi_frame_payload_round_trips_through_pixels() {
     assert_eq!(done.expect("两张都扫到了就该拼齐"), payload);
 }
 
-/// 多帧的码走**单帧入口**时必须报「这条入口只收单帧」，而不是「这不是我们的码」。
+/// A multi-frame code fed to the **single-frame entry** must report "this entry takes single
+/// frames only", not "this is not our code".
 ///
-/// 两条扫描入口共用「在整张图里挑出属于本应用的码」那一步，差别只在挑出来之后怎么
-/// 处置。把它们的行为钉在错误类型上：报错了种类，界面上给出的引导就会指向错的方向
-/// （「扫错了码」vs「这张码只是其中一张」）。
+/// The two scan entries share the step that picks a code of this application out of the whole
+/// image and differ only in what they do with it afterwards. Their behaviour is pinned on the
+/// error type: the wrong kind points the UI guidance in the wrong direction ("wrong code" vs
+/// "this code is only one of several").
 #[test]
 fn the_two_scan_entries_differ_only_in_how_they_treat_multi_frame_codes() {
     let profile = QrProfile::new(EcLevel::Low, 10).expect("版本合法");
@@ -275,7 +288,6 @@ fn the_two_scan_entries_differ_only_in_how_they_treat_multi_frame_codes() {
 
     let first = symbols[0].render(4, 4).expect("渲染参数合法");
 
-    // 多帧入口：解得开，而且是「第 1 张，共 N 张」。
     let frame = qr::scan::decode_frame(&first).expect("多帧入口必须解得开");
     assert_eq!(frame.index, 1);
     assert_eq!(frame.total, symbols.len() as u32);
@@ -286,7 +298,6 @@ fn the_two_scan_entries_differ_only_in_how_they_treat_multi_frame_codes() {
     );
     assert_eq!(frame.payload[..], payload[..frame.payload.len()]);
 
-    // 单帧入口：如实报「这条路只收单帧」，而不是把它当成坏码或别人的码。
     match qr::scan::decode_payload(&first) {
         Err(Error::MultiFrameUnsupported { count }) => {
             assert_eq!(count, symbols.len() as u32);
@@ -294,7 +305,6 @@ fn the_two_scan_entries_differ_only_in_how_they_treat_multi_frame_codes() {
         other => panic!("单帧入口应当报「只收单帧」，实际 {other:?}"),
     }
 
-    // 单帧的码在两个入口下都解得开，且结果一致。
     let single_payload = pseudo_random(8);
     let single = profile.encode_payload(&single_payload).expect("装得下");
     let image = single.render(4, 4).expect("渲染参数合法");
@@ -308,10 +318,11 @@ fn the_two_scan_entries_differ_only_in_how_they_treat_multi_frame_codes() {
     assert_eq!(frame.payload, single_payload);
 }
 
-/// 测试里用的**独立渲染器**：直接把模块画进灰度图。
+/// The **independent renderer** used by the tests: it draws modules straight into a grayscale
+/// image.
 ///
-/// 它与 `Symbol::render` 是两份互不相干的实现，因此「读回来的码与写出去的一致」这条
-/// 结论不会因为渲染代码里的一处共同误解而虚假成立。
+/// It is a separate implementation from `Symbol::render`, so "the code read back matches the one
+/// written out" cannot hold merely because the rendering code shares one misunderstanding.
 fn render_foreign(code: &qrcodegen::QrCode, scale: u32, quiet: u32) -> GrayImage {
     let modules = u32::try_from(code.size()).expect("边长不会是负数");
     let side = (modules + 2 * quiet) * scale;
@@ -336,30 +347,31 @@ fn render_foreign(code: &qrcodegen::QrCode, scale: u32, quiet: u32) -> GrayImage
     GrayImage::from_luma8(side, side, pixels).expect("尺寸自洽")
 }
 
-/// **回归**：这张图曾让图像解码器自己 panic，而它的输入是攻击者可控的。
+/// **Regression**: decoding this image makes the decoder panic internally, and the image is
+/// attacker-controlled input.
 ///
-/// # 输入是什么
+/// # What the input is
 ///
-/// 取自 fuzz 目标 `qr_scan` 的一次真实崩溃。54 字节、43×43 的**周期性噪声**：这样的
-/// 图会让解码器（`rqrr` 0.11.0）的透视变换算出极大值或 NaN，撞上它 `geometry.rs` 里
-/// 那句 `assert!(x <= i32::MAX as f64)`，于是线程 panic。在端侧那就是**用户导入一张
-/// 别人给的图片，应用整个死掉**。
+/// A 54-byte, 43×43 **periodic noise** image, built byte for byte the same way as in the fuzz
+/// target `qr_scan`. Such an image makes the perspective transform inside the decoder
+/// (`rqrr` 0.11.0) compute extreme values or NaN and hit its own
+/// `assert!(x <= i32::MAX as f64)` in `geometry.rs`, which panics the thread. On the client side
+/// that reads as "the user imports a picture someone sent and the whole application dies".
 ///
-/// # 为什么样本嵌在这里，而不是放进 `fuzz/regressions/`
+/// # What this test pins
 ///
-/// 因为 fuzz 目标**看不到**这层收敛：`libfuzzer-sys` 的 panic hook 在展开前就 `abort`，
-/// 而 Windows 上 libFuzzer 的异常处理器还会把 Rust 的 SEH 抛出当成崩溃。样本进了语料库
-/// 就等于让本机的 `qr_scan` **每次开局都报一次崩溃**——一条永远红的关卡只会被无视，
-/// 而这条测试在任何平台上都跑得过。
+/// "The process does not die because of one image" and "the decoder panic is reported
+/// faithfully" as [`Error::QrDecoderPanicked`] — not folded into "no code found" or "not our
+/// code". It does **not** require this image to decode: the image carries no code.
 ///
-/// # 这条测试盯的是什么
+/// The convergence cannot be observed from the fuzz target, because `libfuzzer-sys`'s panic
+/// hook aborts before unwinding and on Windows libFuzzer's exception handler treats Rust's SEH
+/// throw as a crash: putting the sample into the fuzz corpus would make `qr_scan` report a crash
+/// on every run, while this test passes on every platform.
 ///
-/// 「进程不会因为一张图死掉」，以及「解码器崩过这件事被如实报出来」——它**不**要求
-/// 这张图读得出码（它本来就没有码）。图中的构造方式与 fuzz 目标逐字节相同。
-///
-/// 若某天这条断言在升级 `rqrr` 之后失败，先去看那处 `assert!` 还在不在：不在了就把
-/// 断言放宽成「只要求返回错误」，并把本 crate 里那层收敛一起拿掉——那才是它退役的
-/// 正确时机。
+/// These assertions are tied to that `assert!` inside `rqrr`: if a later version stops
+/// panicking, they are relaxed to "an error is returned", together with the `catch_unwind`
+/// layer in this crate.
 #[test]
 fn a_pathological_image_does_not_take_the_process_down() {
     const FUZZ_INPUT: [u8; 54] = [
@@ -368,7 +380,6 @@ fn a_pathological_image_does_not_take_the_process_down() {
         0x01, 0x06, 0xff, 0x2b, 0xeb, 0x00, 0x00, 0x00, 0xbb, 0x14, 0xa4, 0x78, 0x00, 0x00, 0x66,
         0x33, 0x3b, 0x14, 0x00, 0x00, 0x3b, 0x14, 0x00, 0x00,
     ];
-    // 与 `fuzz/fuzz_targets/qr_scan.rs` 逐字节相同的构造方式。
     let width = 1 + u32::from(FUZZ_INPUT[0]) % 48;
     let height = 1 + u32::from(FUZZ_INPUT[1]) % 48;
     let needed = (width as usize) * (height as usize);

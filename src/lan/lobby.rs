@@ -13,38 +13,54 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with this library; if not, see <https://www.gnu.org/licenses/>.
 
-//! 局域网**大厅**：在一段网段上互相看见，并交换「到哪里连我」。
+//! LAN **lobby**: see each other on one network segment and exchange "where to
+//! reach me".
 //!
-//! # 它做什么、不做什么
+//! # What it does
 //!
-//! 做：往一个组播组里周期性地喊一声「我在这里，我的端点公钥与端口是这个」，并听
-//! 别人喊。收到的结果累积成一份 [`LanView`]（谁在这个网段上）。
+//! Periodically announces "I am here, my endpoint key and port are these" into a
+//! multicast group, and listens for the announcements of others. What arrives
+//! accumulates into a [`LanView`]: who is on this segment.
 //!
-//! 不做：**不传同步载荷**。载荷走的是另一条路（QUIC 连接，见 crate 根的说明，或者
-//! 带外二维码），大厅只负责「找到人」。这条分界是刻意的：组播是**不可靠、可被任何
-//! 同网段设备注入**的，把载荷放进去就等于把协议暴露在那样的输入面前。分开之后，大厅
-//! 的最坏情况是「看到一个不存在的设备」，而不是「收到一份需要解析的载荷」。
+//! It does **not** carry synchronization payloads. Payloads travel another way (a
+//! QUIC connection, see the crate root, or an out-of-band QR code) and the lobby
+//! only finds peers. Multicast is unreliable and any device on the segment can
+//! inject into it, so the worst case here is a phantom peer in the view, never a
+//! payload that has to be parsed.
 //!
-//! # 为什么用组播，而不是二维码传地址
+//! # The only module in this crate that touches I/O
 //!
-//! 见 TODO.md 的 M4.5：用户明确选了「UDP 组播大厅做发现」。二维码传地址在跨网段与
-//! 移动网络下仍然有用（那是 D9 的「建链」模式），但同一 WiFi 下每次都要互相扫一次
-//! 码是多余的——设备本来就在同一个广播域里。
+//! It opens sockets, spawns a thread and reads the clock, so its logic is kept
+//! minimal: **all decisions live in [`LanView`]**, and this module only moves
+//! bytes in and out and announces on schedule. The clock is used for intervals
+//! and leases only; it never enters the protocol, which carries no timestamps and
+//! therefore works even when two devices disagree about the time of day.
 //!
-//! # 这是本 crate 里唯一碰 I/O 的模块
+//! # Events
 //!
-//! 它会开 socket、起线程、读时钟。因此它的逻辑被压到最小：**判断都在 [`LanView`]
-//! 里**，这里只做「把字节搬进搬出」与「按时喊一声」。时钟只用来算间隔与租约，从不
-//! 进入协议——协议里没有时间戳，那样才能让两边对「现在几点」不达成一致也照样工作。
+//! The worker thread reports what happened over an unbounded `mpsc` queue of
+//! [`Event`]s, each tagged with the instant it happened. That queue is the only
+//! link between the worker's view and the caller's view: the worker never blocks
+//! on the caller, and a poll returns `None` rather than waiting.
 //!
-//! # 平台注意
+//! # Bounds
 //!
-//! - **Android 17（targetSdk 37+）** 需要 `ACCESS_LOCAL_NETWORK` 才能在局域网里收发
-//!   组播，这一点由端侧处理（见 TODO.md §6.1）。
-//! - **多网卡**上组播从哪张网卡出去是由路由表决定的。`set_multicast_if_v4` 可以指定，
-//!   但本 crate **刻意不指定**：指定就意味着要枚举网卡并猜用户想用哪一张，而那是一
-//!   个比「让路由表决定」更容易出错的选择。默认路由恰好不对时，用户用的会是二维码
-//!   那条路，而不是一个「我们猜错了网卡」的故障。
+//! The view keeps at most [`LanView::MAX_PEERS`] (1024) peers. A device announces
+//! every [`ANNOUNCE_INTERVAL_MS`] (30 s) by default, so discovery takes at most
+//! that long, and a peer silent for [`LanView::STALE_AFTER_MS`] (3 min, six
+//! announce periods) expires and is reported as [`EventKind::Expired`].
+//!
+//! # Platform notes
+//!
+//! - **Android 17 (targetSdk 37+)** needs `ACCESS_LOCAL_NETWORK` to send and
+//!   receive multicast on the local network; the platform layer requests it.
+//! - **Multiple interfaces**: which interface multicast leaves by is decided by
+//!   the routing table. `set_multicast_if_v4` could pin one, but this crate
+//!   deliberately leaves that to the routing table instead of enumerating
+//!   interfaces and guessing which one the user meant.
+//! - **Windows** delivers an incoming multicast datagram only to the last socket
+//!   that bound the group and port, so two [`Lobby`] instances on one machine do
+//!   not hear each other there. That is IP multicast semantics, not a defect.
 
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
@@ -60,46 +76,52 @@ use socket2::{Domain, Protocol, Socket, Type};
 use super::wire::{Announcement, EndpointKey, Kind, LanView, Peer};
 use crate::error::{Error, Result};
 
-/// 大厅使用的组播组。
+/// The multicast group used by the lobby.
 ///
-/// `239.255.81.65` 取在**管理范围**（`239.0.0.0/8`，RFC 2365 的「Administratively
-/// Scoped」）内，且刻意取在 `239.255.0.0/16` 这个**组织本地**子范围里，避免与
-/// SSDP（`239.255.255.250`）、mDNS（`224.0.0.251`）这类知名组撞上。
+/// `239.255.81.65` lies inside the administratively scoped range `239.0.0.0/8`
+/// (RFC 2365) and inside its organization-local subrange `239.255.0.0/16`, so it
+/// does not collide with well-known groups such as SSDP (`239.255.255.250`) or
+/// mDNS (`224.0.0.251`).
 ///
-/// `0x51` 是 `Q`，`65` 是 `A`——没有任何协议含义，只是让这个地址在抓包记录里认得
-/// 出来。
+/// `0x51` is `Q` and `65` is `A`; the digits carry no protocol meaning, they only
+/// make the address recognizable in a packet capture.
 pub const GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 81, 65);
 
-/// 大厅使用的 UDP 端口。
+/// The UDP port used by the lobby.
 ///
-/// 取在动态/私有端口段（49152–65535）之外，因为那个段按 RFC 6335 是留给**临时**
-/// 端口的：把一个长期监听的组播组放在那里，会与系统随机分配的临时端口撞上。这里是
-/// 在注册端口段（1024–49151）里挑的一个没有知名服务占用的号。
+/// It sits outside the dynamic/private range (49152–65535), which RFC 6335
+/// reserves for **ephemeral** ports: a long-lived multicast listener placed there
+/// would collide with system-assigned ephemeral ports. This is a number in the
+/// registered range (1024–49151) that no well-known service occupies.
 pub const PORT: u16 = 21377;
 
-/// 多久喊一声。
+/// How often a device announces, in milliseconds.
 ///
-/// 30 秒是「用户打开应用后多快看到对方」与「待机时的开销」之间的取舍。它同时决定了
-/// 两个数字：最坏发现延迟是 30 秒，而 [`LanView::STALE_AFTER_MS`]（3 分钟）正好是
-/// 它的 6 倍——连丢 6 个周期才判定离线，够宽容。
+/// 30 s balances "how quickly two users see each other after opening the app"
+/// against the cost of idling. It fixes two numbers: worst-case discovery latency
+/// is 30 s, and [`LanView::STALE_AFTER_MS`] (3 min) is exactly six times it, so
+/// six consecutive lost periods are needed to declare a peer offline.
 pub const ANNOUNCE_INTERVAL_MS: u64 = 30_000;
 
-/// 收到一条消息之后最多等多久再检查一次「该喊了吗 / 该退出了吗」（毫秒）。
+/// How long to wait for a datagram before checking again whether it is time to
+/// announce or to exit, in milliseconds.
 ///
-/// 这不是一个协议参数，纯粹是**退出延迟**：`recv_from` 是阻塞的，没有这个上限的话，
-/// 关闭时线程要等到下一个组播报文（最长就是一整个公告周期）才醒过来。200 毫秒是
-/// 「用户感觉不到关闭卡顿」与「每秒醒 5 次」之间的取舍，而在一个只做组播收发的线程
-/// 上，那点唤醒开销可以忽略。
+/// This is not a protocol parameter, it only bounds **shutdown latency**:
+/// `recv_from` blocks, so without this cap the worker thread would sleep until the
+/// next multicast datagram (up to a full announce period) after the exit flag is
+/// cleared. 200 ms balances an imperceptible shutdown against five wakeups per
+/// second, and those wakeups are negligible on a thread that only sends and
+/// receives multicast.
 const LOOP_SLICE_MS: u64 = 200;
 
-/// 大厅的配置。
+/// Configuration of the lobby.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LanConfig {
-    /// 组播组地址。
+    /// Multicast group address.
     pub group: Ipv4Addr,
-    /// UDP 端口。
+    /// UDP port.
     pub port: u16,
-    /// 公告间隔（毫秒）。
+    /// Announce interval in milliseconds.
     pub announce_interval_ms: u64,
 }
 
@@ -114,74 +136,71 @@ impl Default for LanConfig {
 }
 
 impl LanConfig {
-    /// 这个组播组要绑到哪里。
+    /// The `(group, port)` pair announcements are sent to.
     #[must_use]
     pub const fn group_addr(&self) -> SocketAddrV4 {
         SocketAddrV4::new(self.group, self.port)
     }
 }
 
-/// 大厅里发生的一件事。
+/// Something that happened in the lobby.
 ///
-/// # 为什么是事件而不是「变化后的整个视图」
-///
-/// 调用方多半要把这件事显示出来或记下来（「发现设备 X」），而一份完整视图无法表达
-/// 「刚刚」发生了什么。反过来，只给事件也不够——调用方可以在自己那边累积。
-///
-/// # 为什么带着完整的对端快照
-///
-/// 一个只带设备标识的事件，会让接收方在 `Lobby` 侧查不到那个对端（两个视图之间
-/// 只有这条队列相连）。把快照带上，事件本身就成了**自足**的：接收方不需要向任何
-/// 地方再问一次「他现在是什么状态」。
+/// An event describes what just changed, which a full view cannot express, and it
+/// carries the whole [`Peer`] snapshot so that it is self-contained: the queue is
+/// the only link between the worker's view and the caller's, and a receiver must
+/// not have to ask anywhere else for a peer's current state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Event {
-    /// 说的是哪个对端，以及他当时的状态。
+    /// Which peer it is about, and his state at that moment.
     pub peer: Peer,
-    /// 发生了什么事。
+    /// What happened.
     pub kind: EventKind,
 }
 
-/// 事件的种类。
+/// The kind of event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
-    /// 第一次听说这个对端，或他又回来了。
+    /// The peer was first heard of, or came back.
     Appeared,
-    /// 他发过「我要走了」。
+    /// He announced that he is leaving.
     SaidGoodbye,
-    /// 他太久没吭声了。
+    /// He has been silent for too long.
     Expired,
 }
 
-/// 大厅后台线程往事件队列里送的东西：事件 + 它发生的时刻。
+/// What the worker thread puts on the event queue: an event plus the instant it
+/// happened.
 ///
-/// 时刻必须跟着走，否则 `Lobby` 那份视图拿到事件之后无法知道该把
-/// [`Peer::last_seen_ms`] 记成什么——用它自己的时钟会与后台线程的时钟差出一个
-/// 「事件在队列里等了多久」，而那正好会让租约在两边算出不同的结果。
+/// The instant must travel with the event, because the caller's view records it as
+/// [`Peer::last_seen_ms`]: stamping it from the caller's own clock would add
+/// however long the event waited in the queue, which is exactly what would make
+/// the two sides compute different lease outcomes.
 #[derive(Debug, Clone, Copy)]
 struct TimedEvent {
-    /// 事件本身。
+    /// The event itself.
     event: Event,
-    /// 发生时刻（相对后台线程的起点，毫秒）。
+    /// When it happened, in milliseconds since the worker thread started.
     at_ms: u64,
 }
 
-/// 关于本设备自己要念出去的那几个值。
+/// The values this device announces about itself.
 ///
-/// 打成一个小结构体，是因为它们**总是一起出现**：公告、告别、以及后台线程的周期
-/// 喊话都要这三样。分成三个参数或三个字段，就会出现「某一处忘了带上端口」这种
-/// 错误——而它的症状是「对端能发现你，但连不上你」。
+/// They always appear together — in announcements, in the goodbye and in the
+/// worker's periodic announce — so they travel as one struct; passing them as
+/// separate arguments invites dropping the port somewhere, whose symptom is a peer
+/// that can be discovered but not connected to.
 #[derive(Debug, Clone, Copy)]
 struct SelfAnnouncement {
-    /// 本设备的设备标识。
+    /// This device's device identifier.
     device: DeviceId,
-    /// 本设备的传输层端点公钥。
+    /// This device's transport endpoint key.
     endpoint_key: EndpointKey,
-    /// 本设备监听的端口。
+    /// The port this device listens on.
     port: u16,
 }
 
 impl SelfAnnouncement {
-    /// 造一条发给别人的公告。
+    /// Builds an announcement addressed to other devices.
     fn announcement(&self, kind: Kind, sequence: u64) -> Announcement {
         Announcement {
             kind,
@@ -193,63 +212,69 @@ impl SelfAnnouncement {
     }
 }
 
-/// 局域网大厅。
+/// The LAN lobby.
 ///
-/// # 它自己起线程
+/// # It spawns its own thread
 ///
-/// 收发都在一个后台线程里，因此调用方不需要给它喂事件循环，也不需要在 `Drop` 之外
-/// 做任何清理。线程只会在 [`Lobby::shutdown`] 或 `Drop` 时退出，退出时先替所有还
-/// 「在这里」的对端发一条 `Bye`——那让另一个界面上的「已关闭」立刻出现，而不是等
-/// 3 分钟的租约。
+/// Sending and receiving happen on one worker thread, so the caller neither feeds
+/// it an event loop nor cleans anything up beyond dropping it. The thread exits
+/// only on [`Lobby::shutdown`] or `Drop`, and on the way out it sends one `Bye` for
+/// every peer still "here", so the other side sees the peer as closed immediately
+/// instead of waiting for the 3-minute lease.
 ///
-/// # 本机自己发的公告会被自己收到
+/// # A device receives its own announcements
 ///
-/// `IP_MULTICAST_LOOP` 默认是开的，因此一台设备会收到自己刚才喊的那一声。这是**正常
-/// 的**，[`LanView::observe`] 里那条「序号不增就是旧消息」的规则顺带把它压掉了；再
-/// 加上下面显式丢掉 `device == me` 的报文，双保险。
+/// `IP_MULTICAST_LOOP` is on, so a device hears its own announcement back. That is
+/// **normal**: the "a sequence that does not increase is an old message" rule in
+/// [`LanView::observe`] drops it, and the worker also drops datagrams whose
+/// `device == me`.
 pub struct Lobby {
-    /// 本机要念出去的那几个值。
+    /// The values this device announces about itself.
     me: SelfAnnouncement,
-    /// 收发共用的 socket。
+    /// Socket shared by sending and receiving.
     socket: Arc<UdpSocket>,
-    /// 配置。
+    /// Configuration.
     config: LanConfig,
-    /// 当前看到的对端（`Lobby` 这一侧的副本）。
+    /// Peers currently seen (the `Lobby`-side copy).
     view: LanView,
-    /// 事件队列的接收端。
+    /// Receiving end of the event queue.
     events: Receiver<TimedEvent>,
-    /// 后台线程的句柄。
+    /// Handle of the worker thread.
     worker: Option<JoinHandle<()>>,
-    /// 让后台线程退出的开关。
+    /// Flag that tells the worker thread to exit.
     running: Arc<AtomicBool>,
-    /// 公告序号。
+    /// Announcement sequence number.
     ///
-    /// **与后台线程共用同一个计数器**，因此它是 `Arc<AtomicU64>` 而不是一个普通字段：
-    /// `announce_now`（界面线程）与周期喊话（网络线程）都会推进它，而两条路径用各自
-    /// 的计数器会让「序号唯一且递增」这个前提悄悄失效——症状是大厅偶尔把一条**真的**
-    /// 新公告当成旧消息丢掉，极难复现。
+    /// **Shared with the worker thread**, hence an `Arc<AtomicU64>` rather than a
+    /// plain field: `announce_now` (caller thread) and the periodic announce
+    /// (worker thread) both advance it, and two separate counters would silently
+    /// break the "sequences are unique and increasing" premise — the lobby would
+    /// then occasionally treat a genuinely new announcement as an old one.
     sequence: Arc<AtomicU64>,
 }
 
 impl Lobby {
-    /// 打开大厅：绑定端口、加入组播组，并开始喊。
+    /// Opens the lobby: binds the port, joins the multicast group and starts
+    /// announcing.
     ///
-    /// `endpoint_key` 与 `port` 是「别人该怎么连我」，由传输层提供——大厅自己不知道
-    /// QUIC 的存在，它只是把这两个值念出来。
+    /// `endpoint_key` and `port` say how others reach this device and come from
+    /// the transport layer; the lobby knows nothing about QUIC, it only repeats
+    /// those two values.
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// [`Error::LanSocket`]：绑定或加入组播组失败。最常见的原因是**端口已被占用**
-    /// （同一台机器上开了两个实例），以及**防火墙/系统策略**不允许加入组播组。
+    /// [`Error::LanSocket`] if binding or joining the group fails. The usual
+    /// causes are a **port already in use** (two instances on one machine) and a
+    /// **firewall or system policy** that forbids joining the group.
     pub fn open(me: DeviceId, endpoint_key: EndpointKey, port: u16) -> Result<Self> {
         Self::open_with(me, endpoint_key, port, LanConfig::default())
     }
 
-    /// 用给定配置打开大厅。
+    /// Opens the lobby with the given configuration.
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// 同 [`Lobby::open`]。
+    /// Same as [`Lobby::open`].
     pub fn open_with(
         me: DeviceId,
         endpoint_key: EndpointKey,
@@ -291,24 +316,26 @@ impl Lobby {
         })
     }
 
-    /// 当前看到的对端（只含他认为「在这里」的）。
+    /// Peers currently seen (only those considered "here").
     #[must_use]
     pub fn view(&self) -> &LanView {
         &self.view
     }
 
-    /// 非阻塞地取一件事。
+    /// Takes one event without blocking.
     ///
-    /// 没有事件时返回 `None`——它**不是**错误。界面上一次刷新把所有积压的事件取完，
-    /// 因此这里刻意不提供「阻塞等下一件」，那会让界面线程被网络事件牵着走。
+    /// Returns `None` when nothing is queued; that is **not** an error. A UI
+    /// refresh drains everything that piled up, so there is deliberately no
+    /// "block until the next event", which would tie the caller to network
+    /// traffic.
     pub fn try_poll(&mut self) -> Option<Event> {
         self.events.try_recv().ok().map(|timed| self.apply(timed))
     }
 
-    /// 阻塞最多 `timeout` 取一件事。
+    /// Takes one event, blocking for at most `timeout`.
     ///
-    /// 超时返回 `None`。它与「没有事件」是同一件事——调用方要么再等，要么去干别的；
-    /// 把它报成错误只会让每个调用点都写一遍同样的 `match`。
+    /// Returns `None` on timeout, which means the same thing as "no event": the
+    /// caller either waits again or does something else.
     pub fn poll(&mut self, timeout: Duration) -> Option<Event> {
         self.events
             .recv_timeout(timeout)
@@ -316,48 +343,44 @@ impl Lobby {
             .map(|timed| self.apply(timed))
     }
 
-    /// 立刻喊一声（不等下一个周期）。
+    /// Announces immediately, without waiting for the next period.
     ///
-    /// 用途是「用户刚点开同步界面」：正常情况下要等最多 30 秒才轮到下一个周期，而
-    /// 用户在这个界面上的耐心是以秒计的。
+    /// Meant for the moment a user opens the sync screen: otherwise the next
+    /// period is up to 30 s away.
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// [`Error::LanSocket`]：发送失败（网卡消失、组播被策略拦下）。
+    /// [`Error::LanSocket`] if sending fails (interface gone, multicast blocked by
+    /// policy).
     pub fn announce_now(&self) -> Result<()> {
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
         let announcement = self.me.announcement(Kind::Hello, sequence);
         send_datagram(&self.socket, self.config, &announcement)
     }
 
-    /// 关掉大厅：替所有还在的对端发一条 `Bye`，然后停掉后台线程。
+    /// Closes the lobby: sends a `Bye` for every peer still here, then stops the
+    /// worker thread.
     ///
-    /// 重复调用是安全的（第二次什么也不做）。
+    /// Calling it more than once is safe; the second call does nothing.
     pub fn shutdown(&mut self) {
         self.send_goodbye();
         self.running.store(false, Ordering::Relaxed);
         if let Some(worker) = self.worker.take() {
-            // 线程可能因为 socket 出错而提前退出，那是正常结局，不是要在这里处理的事。
             let _ = worker.join();
         }
     }
 
-    /// 把一件事记进这一侧的视图。
+    /// Records an event in this side's view.
     ///
-    /// # 为什么重新走一遍 `observe`
-    ///
-    /// 视图只该有**一条**写入路径。后台线程那份视图已经做过同样的推理，这里再做一遍
-    /// 不是冗余——它是「两份视图必须一致」这条要求的实现方式，而 `observe` 的序号
-    /// 规则让重复应用同一件事是幂等的。
+    /// Both views are written through the same `observe` path, so replaying an
+    /// event here is what keeps the worker's view and this one consistent, and the
+    /// sequence rule makes applying the same event twice idempotent.
     fn apply(&mut self, timed: TimedEvent) -> Event {
         let kind = match timed.event.kind {
             EventKind::Appeared => Kind::Hello,
-            // 「说了再见」与「太久没吭声」在视图里是同一件事：他不再「在这里」。
             EventKind::SaidGoodbye | EventKind::Expired => Kind::Bye,
         };
         let peer = timed.event.peer;
-        // 序号取自快照：`LanView::expire` 已经把水位推高一格，因此这条状态变化能被
-        // 重新说出来；而 `SaidGoodbye` 的序号本来就是公告自己带的那个。
         self.view.observe(
             Announcement {
                 kind,
@@ -371,14 +394,12 @@ impl Lobby {
         timed.event
     }
 
-    /// 替所有还「在这里」的对端发一条 `Bye`。
+    /// Sends a `Bye` for every peer still "here".
     fn send_goodbye(&self) {
         for peer in self.view.here() {
             let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
             let announcement = self.me.announcement(Kind::Bye, sequence);
-            // 发送失败只能忽略：这已经是析构路径，没有地方可以报错，也不该 panic。
             let _ = send_datagram(&self.socket, self.config, &announcement);
-            // 对端快照只用来决定「发给谁」——`Bye` 说的是**我们自己**要走。
             let _ = peer;
         }
     }
@@ -390,11 +411,17 @@ impl Drop for Lobby {
     }
 }
 
-/// 后台线程：一边听，一边按时喊。
+/// Worker thread: listens and announces on schedule.
 ///
-/// 抽成自由函数而不是方法，是为了让它能**拥有**视图的那份可变借用：`Lobby::view` 是
-/// 给调用方看的只读副本，两者不是同一份数据。它们之间靠事件队列同步——一条队列换掉
-/// 一把锁，收益是界面线程永远不会被网络线程拖住。
+/// It is a free function rather than a method so that it can own the mutable view:
+/// [`Lobby::view`] is a separate read-only copy for the caller, not the same data.
+/// The two are synchronized by the event queue alone, so the caller is never
+/// blocked by the network thread.
+///
+/// A `recv_from` error that is neither `WouldBlock` nor `TimedOut` is not fatal:
+/// the loop sleeps for one [`LOOP_SLICE_MS`] slice and tries again, and only
+/// `running` becoming `false` ends it. A failed `events.send` means the receiver is
+/// gone (the `Lobby` is being dropped) and is ignored as well.
 fn serve(
     socket: &Arc<UdpSocket>,
     config: LanConfig,
@@ -409,20 +436,18 @@ fn serve(
     let mut buffer = [0_u8; 512];
 
     while running.load(Ordering::Relaxed) {
-        // ① 该喊了吗。
+        // 1. Time to announce.
         let due = match last_announce {
             None => true,
             Some(last) => last.elapsed().as_millis() as u64 >= config.announce_interval_ms,
         };
         if due {
-            // 序号与界面线程共用，因此从原子量取，而不是从这里的一个局部计数器。
             let sequence = sequence.fetch_add(1, Ordering::Relaxed);
             let _ = send_datagram(socket, config, &me.announcement(Kind::Hello, sequence));
             last_announce = Some(Instant::now());
         }
 
-        // ② 听一会儿。等待时间取「距下一次该喊还有多久」与 [`LOOP_SLICE`] 的较小值，
-        //    因此喊话周期是准的，而退出延迟仍然有界。
+        // 2. Listen for a while.
         let slice = match last_announce {
             Some(last) => config
                 .announce_interval_ms
@@ -438,26 +463,18 @@ fn serve(
                     continue;
                 };
                 let Ok(announcement) = Announcement::decode(datagram) else {
-                    // 组播组是共享的：不是我们的报文、或是比我们新的版本，都是**正常
-                    // 现象**，不记日志也不报错。
                     continue;
                 };
-                // 自己喊的那一声会被自己收到（`IP_MULTICAST_LOOP`）。
                 if announcement.device == me.device {
                     continue;
                 }
                 let at_ms = started.elapsed().as_millis() as u64;
-                // `observe` 的返回值先落成一个布尔量，再在下面 `if let` 的分支里使用：
-                // 直接把它嵌进 `if let` 会让「有没有变化」这个条件在借用 `view` 之后
-                // 才求值，而那时 `view.get` 又要借一次。
                 let changed = view.observe(announcement, at_ms);
                 if changed && let Some(peer) = view.get(&announcement.device) {
                     let kind = match announcement.kind {
                         Kind::Hello => EventKind::Appeared,
                         Kind::Bye => EventKind::SaidGoodbye,
                     };
-                    // 接收端已经没了（`Lobby` 正在析构）时发送会失败，那是正常结局。
-                    // 队列本身是无界的，因此网络线程永远不会被界面拖住。
                     let _ = events.send(TimedEvent {
                         event: Event { peer, kind },
                         at_ms,
@@ -465,17 +482,12 @@ fn serve(
                 }
             }
             Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-            // 其它错误（网卡消失、socket 被关）不值得把线程打死：下一次 `recv_from`
-            // 可能就好了。真正要退出时 `running` 会变成 `false`。
             Err(_) => thread::sleep(Duration::from_millis(LOOP_SLICE_MS)),
         }
 
-        // ③ 租约。
+        // 3. Leases.
         let at_ms = started.elapsed().as_millis() as u64;
         for device in view.expire(at_ms) {
-            // 此刻视图里那个对端已经是「已离开」，而 `expire` 把它的序号推高了一格
-            // ——因此这条状态变化能被接收方重新说出来。带上 `at_ms` 而不是让接收方
-            // 用自己的时钟，是为了让租约在两边算出同一个结果。
             if let Some(peer) = view.get(&device) {
                 let _ = events.send(TimedEvent {
                     event: Event {
@@ -489,30 +501,36 @@ fn serve(
     }
 }
 
-/// 绑定并加入组播组。
+/// Binds the socket and joins the multicast group.
 ///
-/// # 为什么用 `socket2` 而不是 `std::net::UdpSocket::bind`
+/// # Socket options
 ///
-/// `std` 的 `bind` 是一步到位的，中间没有设选项的机会，而这里**必须**在 `bind`
-/// **之前**设 `SO_REUSEADDR`：不设的话，同一台机器上的第二个进程要么 `bind` 直接
-/// 失败（Windows），要么收不到任何组播（Linux）。本 crate 有
-/// `#![forbid(unsafe_code)]`，而 `setsockopt` 是 `unsafe`，因此这一步只能交给
-/// `socket2`——把唯一需要 `unsafe` 的地方收进一个专门做这件事、且被广泛使用的 crate，
-/// 比自己开一个口子更可控。
+/// `SO_REUSEADDR` **must** be set before `bind`: without it a second process on the
+/// same machine either fails to bind (Windows) or receives no multicast at all
+/// (Linux). The socket is bound to the wildcard address, the only form that behaves
+/// the same everywhere: it receives everything arriving on that port, and
+/// `join_multicast_v4` then decides which groups are delivered to it. Binding the
+/// group address instead filters unicast out on Linux but loses multicast on
+/// Windows as well. The interface passed to the join is `UNSPECIFIED`, which leaves
+/// the choice to the routing table; `IP_MULTICAST_TTL` is fixed at 1 so
+/// announcements stay on this segment; `IP_MULTICAST_LOOP` is left enabled, which
+/// same-machine tests rely on.
 ///
-/// # 为什么绑通配符而不是组播地址
+/// # Why `socket2` and not `std::net::UdpSocket::bind`
 ///
-/// 两者在不同平台上行为不一样，而**绑通配符是唯一到处都对的那个**：它在这个端口上
-/// 接收一切，再由 `join_multicast_v4` 决定哪些组播组的内容会被投递上来。绑组播地址
-/// 在 Linux 上能把单播挡在外面，但在 Windows 上会连组播一起收不到。
+/// `std`'s `bind` sets no options, and this crate has `#![forbid(unsafe_code)]`
+/// while `setsockopt` is `unsafe`, so the options above can only be set through a
+/// dedicated crate.
 ///
-/// 代价是「有人往这个端口发单播」也会被收到。这是可接受的：解码那一层第一件事就是
-/// 核对魔数（见 [`Announcement::decode`]），不是我们的报文会被直接丢掉。
+/// # Cost of the wildcard bind
+///
+/// Unicast datagrams sent to this port are received as well. That is acceptable:
+/// [`Announcement::decode`] checks the magic first and drops anything that is not
+/// ours.
 fn bind_multicast(config: LanConfig) -> Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
         .map_err(|_| Error::LanSocket { operation: "new" })?;
 
-    // 顺序不能反：`SO_REUSEADDR` 必须在 `bind` 之前设。
     socket
         .set_reuse_address(true)
         .map_err(|_| Error::LanSocket {
@@ -524,27 +542,18 @@ fn bind_multicast(config: LanConfig) -> Result<UdpSocket> {
         .bind(&bind_addr.into())
         .map_err(|_| Error::LanSocket { operation: "bind" })?;
 
-    // 加入组播组。接口传 `UNSPECIFIED` 表示「由系统决定从哪张网卡加入」——多网卡的
-    // 选择留给路由表，理由见模块文档。
     socket
         .join_multicast_v4(&config.group, &Ipv4Addr::UNSPECIFIED)
         .map_err(|_| Error::LanSocket {
             operation: "join_multicast",
         })?;
 
-    // 让回环开着：同机测试与「自己喊的那一声被自己收到」都依赖它，而多收一条自己的
-    // 公告的代价是零（[`LanView::observe`] 的序号比较会压掉它，`serve` 里也显式丢掉）。
     socket
         .set_multicast_loop_v4(true)
         .map_err(|_| Error::LanSocket {
             operation: "set_multicast_loop",
         })?;
 
-    // TTL 1：大厅只在这一个网段上有意义。
-    //
-    // 这不只是省事——**TTL 大于 1 会让公告飘到别的网段**，而「设备列表里出现了一台
-    // 隔壁办公室的机器」是用户无法理解的现象。路由器默认也多半不转发 239/8，但那不
-    // 该由我们指望。
     socket
         .set_multicast_ttl_v4(1)
         .map_err(|_| Error::LanSocket {
@@ -554,7 +563,7 @@ fn bind_multicast(config: LanConfig) -> Result<UdpSocket> {
     Ok(UdpSocket::from(socket))
 }
 
-/// 把一个公告发到组播组里。
+/// Encodes an announcement and sends it to the configured group address.
 fn send_datagram(
     socket: &Arc<UdpSocket>,
     config: LanConfig,
@@ -576,15 +585,16 @@ mod tests {
     use socket2::SockAddr;
     use std::sync::Mutex;
 
-    /// 同一台机器上真的有组播可用吗。
+    /// Whether multicast really works on this machine.
     ///
-    /// 在**没有网卡**的环境里（很多 CI 容器、以及关掉了网络的开发机）组播是收不到的，
-    /// 而那是环境问题，不是本 crate 的问题。凡是依赖「数据报真的从组播里过来了」的
-    /// 测试都先问这一句，问不到就跳过——**跳过而不是失败**，因为一条会红的测试在
-    /// 那种环境上只会被无视。
+    /// Where there is no usable network stack (many CI containers, machines with
+    /// networking turned off) no multicast is delivered, and that is an environment
+    /// problem rather than a problem of this crate. Every test that needs a
+    /// datagram to really arrive over multicast asks this first and returns early
+    /// instead of failing.
     static MULTICAST_WORKS: Mutex<Option<bool>> = Mutex::new(None);
 
-    /// 探测一次并缓存结果。
+    /// Probes once and caches the result.
     fn multicast_works() -> bool {
         let mut cached = MULTICAST_WORKS
             .lock()
@@ -597,11 +607,15 @@ mod tests {
         ok
     }
 
-    /// 真的建一对 socket 试一次：一个加入组、一个往组里发，看收不收得到。
+    /// Really builds a pair of sockets and tries once: one joins the group, the
+    /// other sends into it, and the result says whether the datagram arrived.
     ///
-    /// 接收方显式限定在**回环网卡**上，发送方也显式指定回环网卡出组播——不这么做的
-    /// 话，数据报会从默认网卡出去，而加入了回环网卡的接收方收不到它（这是 IP 组播
-    /// 的正常语义，不是缺陷）。
+    /// The receiver joins on the **loopback** interface and the sender pins its
+    /// outgoing multicast interface to loopback as well; otherwise the datagram
+    /// leaves by the default interface and a loopback-joined receiver never sees
+    /// it, which is normal IP multicast semantics rather than a defect.
+    ///
+    /// Returns `false` when the machine cannot complete the exchange.
     fn probe_multicast() -> bool {
         let group = Ipv4Addr::new(239, 255, 81, 200);
         let Ok(listener) = joined_socket(group, 0, Ipv4Addr::LOCALHOST) else {
@@ -629,10 +643,12 @@ mod tests {
         matches!(listener.recv_from(&mut buffer), Ok((16, _)))
     }
 
-    /// 建一个「绑通配符、设 `SO_REUSEADDR`、加入组播组」的接收 socket。
+    /// Builds a receiving socket that binds the wildcard address, sets
+    /// `SO_REUSEADDR` and joins the group.
     ///
-    /// 顺序与 [`bind_multicast`] 一致，但接口是可指定的——测试要靠指定接口把组播
-    /// 圈在回环网卡上，否则它在一台没有真实网卡（或有多张网卡）的机器上会飘。
+    /// The order matches [`bind_multicast`], but the interface is a parameter:
+    /// tests use it to pin multicast to loopback, otherwise they would drift on a
+    /// machine with no real interface or with several.
     fn joined_socket(
         group: Ipv4Addr,
         port: u16,
@@ -647,16 +663,17 @@ mod tests {
         Ok(UdpSocket::from(socket))
     }
 
-    /// 造一台设备。
+    /// Builds an endpoint key for tests.
     fn endpoint(seed: u8) -> EndpointKey {
         EndpointKey::from_bytes([seed; 32])
     }
 
-    /// 一条测试用的大厅配置。
+    /// A lobby configuration for tests.
     ///
-    /// `port` **不能**是 0：公告是发往 `(组播组, 端口)` 的，而端口 0 会让「发到哪里」
-    /// 与「绑在哪里」变成两个不同的临时端口，谁也收不到谁。`group` 每条测试各不相同，
-    /// 让并发跑的测试互不干扰。
+    /// `port` **must not** be 0: announcements are sent to `(group, port)`, and port
+    /// 0 would make "where we send" and "where we bind" two different ephemeral
+    /// ports, so nobody would hear anybody. Every test uses a distinct `group`, so
+    /// tests running concurrently do not interfere.
     fn config(last_octet: u8, port: u16, announce_interval_ms: u64) -> LanConfig {
         LanConfig {
             group: Ipv4Addr::new(239, 255, 81, last_octet),
@@ -665,18 +682,21 @@ mod tests {
         }
     }
 
-    /// **组播的收发在真实 socket 上跑得通。**
+    /// **Multicast really round-trips over real sockets.**
     ///
-    /// 这条测试不能用 [`Lobby`] 自己来测：Windows 上同一个组播组+端口只能被绑定一次，
-    /// 后绑的那个赢，因此两个 `Lobby` 在同一台机器上收不到对方。这里显式建一对
-    /// socket——一个加入组、一个往组里发——把「加入组播组之后真的收得到」这件事钉住。
-    /// 它覆盖的是 `join_multicast_v4` 与 `send_to` 这两个本模块真正碰系统调用的地方，
-    /// 而**视图归并**那部分由 `wire` 模块的纯逻辑测试覆盖。
+    /// This cannot use [`Lobby`] itself: on Windows a group and port can be bound
+    /// only once and the last binder wins, so two `Lobby` instances on one machine
+    /// do not hear each other. The test builds the socket pair explicitly — one
+    /// joins the group, one sends into it — pinning down that joining a group really
+    /// makes datagrams arrive. It covers `join_multicast_v4` and `send_to`, the two
+    /// places in this module that make system calls; view merging is covered by the
+    /// pure-logic tests in `wire`.
+    ///
+    /// Returns early when the machine has no usable network stack.
     #[test]
     fn multicast_round_trip_over_the_loopback_interface() {
         let group = Ipv4Addr::new(239, 255, 81, 67);
         let Ok(listener) = joined_socket(group, 0, Ipv4Addr::LOCALHOST) else {
-            // 这台机器上没有可用的网络栈。跳过而不是失败，理由见 `multicast_works`。
             return;
         };
         listener
@@ -707,7 +727,10 @@ mod tests {
         assert_eq!(decoded, announcement);
     }
 
-    /// 「绑定 + 加入组 + 设 TTL」这条路径能跑完。
+    /// The "bind + join group + set TTL" path runs to completion.
+    ///
+    /// On a machine without networking `join_multicast_v4` fails instead; the error
+    /// must then come from one of the system calls in that path.
     #[test]
     fn binding_and_joining_works_on_this_machine() {
         let config = config(68, 21_392, ANNOUNCE_INTERVAL_MS);
@@ -720,7 +743,6 @@ mod tests {
                 );
             }
             Err(Error::LanSocket { operation }) => {
-                // 没有网络的环境下 `join_multicast_v4` 会失败。如实跳过。
                 assert!(
                     matches!(
                         operation,
@@ -733,15 +755,20 @@ mod tests {
         }
     }
 
-    /// **两方在同一个组播组+端口上真的能互相看见。**
+    /// **Two sockets really see each other on one group and port.**
     ///
-    /// 这条是「同一台机器上能验证到什么程度」的答案：Windows 只把数据报交给最后一个
-    /// 绑定者，因此两个 `Lobby` 在**Windows 上收不到对方**（这是 IP 组播的语义，不是
-    /// 我们的缺陷）。于是这里把「真实的那一半」拆出来：外部 socket 先加入组，再用
-    /// [`bind_multicast`]（也就是 `Lobby` 用的那一个）加入同一个组，然后真的发一条
-    /// 公告进去，看双方各自收到什么。
+    /// This is as far as verification goes on a single machine: Windows hands a
+    /// datagram only to the last binder, so two `Lobby` instances do **not** hear
+    /// each other there (IP multicast semantics, not a defect). The test therefore
+    /// splits out the real half: an external socket joins the group first, then
+    /// [`bind_multicast`] — the very function `Lobby` uses — joins the same group,
+    /// and one announcement is really sent into it, after which each side is checked
+    /// for what it received. The sender joins the group too, otherwise its multicast
+    /// might not be delivered to the joined members on this segment.
     ///
-    /// 收到了就断言内容；一台都没收到就跳过——那说明这台机器上组播不可用。
+    /// Received datagrams are compared against the announcement; when neither side
+    /// received anything, multicast is unavailable on this machine and the test
+    /// returns early.
     #[test]
     fn two_sockets_can_join_the_same_group() {
         let config = config(69, 21_393, ANNOUNCE_INTERVAL_MS);
@@ -760,7 +787,6 @@ mod tests {
             .set_read_timeout(Some(Duration::from_millis(400)))
             .expect("设置读超时");
 
-        // 发送方也要加入组，否则它发出去的组播在这个网段上未必被投递到已加入的成员。
         let Ok(sender) = joined_socket(config.group, 0, Ipv4Addr::UNSPECIFIED) else {
             return;
         };
@@ -787,7 +813,6 @@ mod tests {
         }
 
         if seen.is_empty() {
-            // 这台机器上一次组播都没投递（没有网卡，或被策略拦下）。跳过。
             return;
         }
         for decoded in seen {
@@ -795,10 +820,10 @@ mod tests {
         }
     }
 
-    /// 报文的长度就是线格式的长度，且魔数在。
+    /// The datagram length equals the wire format length and the magic is present.
     ///
-    /// 这条测试盯的是 [`crate::lan::wire::DATAGRAM_LEN`] 那个「加出来的常量」——
-    /// 它一旦与字段各自漂移，就会先在这里露出来。
+    /// This pins [`crate::lan::wire::DATAGRAM_LEN`], the constant summed from the
+    /// field lengths: if it drifts from the fields, this test fails first.
     #[test]
     fn the_datagram_length_matches_the_wire_format() {
         let announcement = Announcement {
@@ -817,7 +842,7 @@ mod tests {
         assert_eq!(&bytes[..8], b"Q2FALAN\0");
     }
 
-    /// 事件队列为空时 `try_poll` 返回 `None`，且这**不是**错误。
+    /// `try_poll` returns `None` on an empty queue, and that is **not** an error.
     #[test]
     fn an_empty_lobby_reports_no_events() {
         let Ok(mut lobby) = Lobby::open_with(
@@ -834,11 +859,13 @@ mod tests {
         assert_eq!(lobby.poll(Duration::from_millis(1)), None);
     }
 
-    /// **一条公告真的从 socket 走到视图里。**
+    /// **An announcement really travels from the socket into the view.**
     ///
-    /// 这是本模块唯一一条覆盖「收 → 解 → 观察 → 发事件 → 记进视图」整条链路的测试。
-    /// 它不依赖组播：数据报直接发到 [`Lobby`] 的临时端口上（`127.0.0.1` 出去、绑在
-    /// 通配符上的 socket 收下来），因此只要有回环就一定能跑。
+    /// The only test in this module covering the whole
+    /// "receive → decode → observe → emit event → store in view" chain. It does not
+    /// need multicast: the datagram is sent straight to the lobby's ephemeral port
+    /// over `127.0.0.1`, where the wildcard-bound socket picks it up, so loopback is
+    /// the only requirement.
     #[test]
     fn an_announcement_reaches_the_view() {
         let Ok(mut lobby) = Lobby::open_with(
@@ -875,11 +902,9 @@ mod tests {
         assert_eq!(event.peer.port, peer.port);
         assert_eq!(event.peer.status, PeerStatus::Here);
 
-        // 视图也必须跟着变——事件与视图是两份数据，只更新一份就等于没更新。
         assert_eq!(lobby.view().here().len(), 1);
         assert_eq!(lobby.view().get(&peer.device), Some(event.peer));
 
-        // 同一条再发一次：序号没变，因此不产生事件。
         injector
             .send_to(
                 &peer.encode(),
@@ -893,11 +918,13 @@ mod tests {
         );
     }
 
-    /// 别人家的、和坏掉的报文都必须被悄悄丢掉，且不得把视图弄脏。
+    /// Foreign and broken datagrams are dropped silently and must not dirty the
+    /// view.
     ///
-    /// 组播组是共享的：同一网段上可能有别人的程序，也可能有人往这个组里灌任意字节。
-    /// 「安静地丢掉」是这里唯一正确的处置——报错会让一条完全正常的网络现象看起来像
-    /// 故障，而界面会被它刷屏。
+    /// The group is shared: other programs on the segment may use it, and anyone can
+    /// put arbitrary bytes into it, so dropping quietly is the only correct handling.
+    /// Reporting an error would make a completely normal network occurrence look
+    /// like a failure.
     #[test]
     fn foreign_and_broken_datagrams_are_ignored() {
         let Ok(mut lobby) = Lobby::open_with(
@@ -924,13 +951,15 @@ mod tests {
         assert!(lobby.view().is_empty(), "坏报文不得进视图");
     }
 
-    /// **周期喊话真的把公告发出去了。**
+    /// **The periodic announce really reaches the group.**
     ///
-    /// 这条测试监听 `<组播组, 端口>`，并让 `Lobby` 以 20 毫秒的周期往同一个组里喊。
-    /// 它同时钉住两件容易写错的事：公告发往的是 `(组, 端口)` 而不是别处，以及周期
-    /// 喊话用的是**本机的**设备标识与端点公钥。
+    /// Listens on `<group, port>` while a `Lobby` announces into the same group every
+    /// 20 ms, which pins two things that are easy to get wrong: the announcement goes
+    /// to `(group, port)` and not somewhere else, and the periodic announce uses
+    /// **this device's** id and endpoint key.
     ///
-    /// 收不到就跳过——Windows 只把组播交给最后一个绑定者，这台机器上可能正好不是我们。
+    /// Returns early when nothing arrives within the timeout: on Windows only the
+    /// last binder receives multicast.
     #[test]
     fn the_periodic_announce_reaches_the_group() {
         if !multicast_works() {
@@ -952,7 +981,6 @@ mod tests {
         let mut buffer = [0_u8; 512];
         loop {
             let Ok((length, _)) = listener.recv_from(&mut buffer) else {
-                // 3 秒内一条都没收到。这台机器上组播没投递给我们，跳过。
                 return;
             };
             let Ok(announcement) = Announcement::decode(&buffer[..length]) else {
@@ -969,7 +997,8 @@ mod tests {
         drop(lobby);
     }
 
-    /// 关闭之后线程必须真的退出，且能重复调用。
+    /// After shutdown the worker thread really exits, and shutdown may be called
+    /// twice.
     #[test]
     fn shutdown_is_idempotent_and_stops_the_worker() {
         let Ok(mut lobby) = Lobby::open_with(
@@ -986,11 +1015,13 @@ mod tests {
         assert!(lobby.worker.is_none(), "线程句柄应当已经被取走");
     }
 
-    /// 自己喊的那一声不该把自己变成对端。
+    /// A device never turns itself into a peer.
     ///
-    /// `IP_MULTICAST_LOOP` 会把本机发的组播回送给自己，而我们**刻意**不关掉它（同机
-    /// 测试依赖它）。这条测试保证关掉它的替代方案——显式丢掉 `device == me` 的报文
-    /// ——确实在起作用。
+    /// `IP_MULTICAST_LOOP` loops a device's own multicast back to it and is
+    /// deliberately left enabled, so this pins the explicit `device == me` drop in
+    /// the worker, the check that keeps self out of the view. The datagram is
+    /// injected straight into the lobby's own port, where it is decoded and then
+    /// dropped by that check.
     #[test]
     fn a_device_never_becomes_its_own_peer() {
         let me = DeviceId::from_bytes([6; 32]);
@@ -999,7 +1030,6 @@ mod tests {
             return;
         };
 
-        // 数据报注入到自己的端口上：它会在 `serve` 里被解出来，然后被那条显式检查丢掉。
         let port = lobby.socket.local_addr().expect("本地地址").port();
         let injector = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("绑注入方");
         let mine = Announcement {
@@ -1023,19 +1053,22 @@ mod tests {
         );
     }
 
-    /// 一条公告在最小 MTU 上装得下，且余量够再装一条。
+    /// One announcement fits the smallest MTU with room for a second one.
     ///
-    /// 这条性质不显眼但重要：组播报文**不允许分片**（分片会丢掉「要么整条到、要么
-    /// 不到」的语义，而我们的格式是定长的，分片只会让解析器看到半条——虽然它会拒绝，
-    /// 但那意味着这条路在 MTU 小的链路上根本不通）。
+    /// The property is easy to overlook but matters: multicast datagrams must not be
+    /// fragmented, since fragmentation loses the "either the whole datagram arrives
+    /// or none of it does" semantics, and a fragment would only show the parser half
+    /// a datagram. The parser would reject it, but that means the path is unusable on
+    /// links with a small MTU.
     ///
-    /// 判据用**余量**而不是「小于某个数」：后者在格式加了字段之后可能仍然成立，而
-    /// 余量归零是那种改动真正会撞上的边界。
+    /// The check is on the **budget** rather than "smaller than some number": the
+    /// latter could still hold after a field is added, while the budget running out
+    /// is the boundary such a change really hits.
     #[test]
     fn the_datagram_leaves_room_within_the_smallest_mtu() {
-        /// IPv4 要求任何主机都能重组 576 字节的数据报（RFC 791）。
+        /// IPv4 requires every host to reassemble a 576-byte datagram (RFC 791).
         const MIN_IPV4_MTU: usize = 576;
-        /// IPv4 头（20）+ UDP 头（8）。
+        /// IPv4 header (20) + UDP header (8).
         const HEADERS: usize = 28;
         let payload_budget = MIN_IPV4_MTU - HEADERS;
         assert!(
