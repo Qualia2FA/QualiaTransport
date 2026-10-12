@@ -963,7 +963,10 @@ mod tests {
         }
 
         assert_eq!(lobby.poll(Duration::from_millis(500)), None);
-        assert!(lobby.view().is_empty(), "a broken datagram must not enter the view");
+        assert!(
+            lobby.view().is_empty(),
+            "a broken datagram must not enter the view"
+        );
     }
 
     /// **The periodic announce really reaches the group.**
@@ -1027,7 +1030,10 @@ mod tests {
 
         lobby.shutdown();
         lobby.shutdown();
-        assert!(lobby.worker.is_none(), "the thread handle must have been taken");
+        assert!(
+            lobby.worker.is_none(),
+            "the thread handle must have been taken"
+        );
     }
 
     /// A device never turns itself into a peer.

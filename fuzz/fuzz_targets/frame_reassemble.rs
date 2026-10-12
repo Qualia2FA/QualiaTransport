@@ -94,14 +94,14 @@ fn check_reassembly(data: &[u8]) {
 
         assert!(
             reassembler.received() >= last_received,
-            "收到的张数减少了：{last_received} → {}",
+            "the number of received frames went down: {last_received} → {}",
             reassembler.received()
         );
         last_received = reassembler.received();
         if let Some(total) = reassembler.expected_frames() {
             assert!(
                 reassembler.received() <= total as usize,
-                "收到的张数超过了总张数"
+                "more frames received than the total"
             );
         }
     }
@@ -111,7 +111,7 @@ fn check_reassembly(data: &[u8]) {
     {
         assert!(
             reassembler.missing().is_empty(),
-            "收齐了却还说缺帧：{:?}",
+            "complete, yet frames are still reported missing: {:?}",
             reassembler.missing()
         );
     }
@@ -136,12 +136,15 @@ fn check_roundtrip(data: &[u8]) {
     let mut reassembler = Reassembler::new(capacity);
     let mut done = None;
     for text in &frames {
-        done = reassembler.push(text).expect("自己拆出来的帧必须收得下");
+        done = reassembler
+            .push(text)
+            .expect("a frame it split itself must be accepted");
     }
     assert_eq!(
-        done.expect("自己拆出来的帧必须拼得齐").as_slice(),
+        done.expect("a frame it split itself must reassemble")
+            .as_slice(),
         payload,
-        "拆帧往返不一致（容量已知）"
+        "the frame round trip is inconsistent (capacity known)"
     );
 
     let mut reassembler = Reassembler::from_first_frame();
@@ -149,12 +152,13 @@ fn check_roundtrip(data: &[u8]) {
     for text in frames.iter().rev() {
         done = reassembler
             .push(text)
-            .expect("容量未知时也应当收得下（逆序）");
+            .expect("it must be accepted with an unknown capacity too (reversed)");
     }
     assert_eq!(
-        done.expect("逆序也必须拼得齐").as_slice(),
+        done.expect("it must reassemble in reverse order too")
+            .as_slice(),
         payload,
-        "拆帧往返不一致（容量未知、逆序）"
+        "the frame round trip is inconsistent (unknown capacity, reversed)"
     );
 }
 
@@ -165,16 +169,18 @@ fn check_roundtrip(data: &[u8]) {
 /// codes are scanned out of order, and the result looks perfectly normal — the payload layer's
 /// AEAD only reports a failed decryption.
 fn check_assembled(reassembler: &Reassembler, accepted: &[(u32, u32, Vec<u8>)], bytes: &[u8]) {
-    let total = reassembler.expected_frames().expect("拼齐了就有总数");
+    let total = reassembler
+        .expected_frames()
+        .expect("a complete set has a total");
     let mut expected = Vec::new();
     for index in 1..=total {
         let Some((_, _, payload)) = accepted
             .iter()
             .find(|(at, count, _)| *at == index && *count == total)
         else {
-            panic!("拼齐了却找不到第 {index} 帧（总数 {total}）");
+            panic!("complete, yet frame {index} is not among the accepted ones (total {total})");
         };
         expected.extend_from_slice(payload);
     }
-    assert_eq!(bytes, expected.as_slice(), "拼装顺序不对");
+    assert_eq!(bytes, expected.as_slice(), "the assembly order is wrong");
 }

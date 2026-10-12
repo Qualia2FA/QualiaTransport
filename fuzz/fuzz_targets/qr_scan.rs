@@ -102,7 +102,7 @@ fuzz_target!(|data: &[u8]| {
     let needed = (width as usize) * (height as usize);
     let pixels: Vec<u8> = data[2..].iter().copied().cycle().take(needed).collect();
     let Ok(image) = GrayImage::from_luma8(width, height, pixels) else {
-        panic!("构造出的图像尺寸与像素数不符");
+        panic!("the constructed image size does not match the pixel count");
     };
 
     let _ = qr::scan::decode_text(&image);
@@ -111,11 +111,14 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    let profile = QrProfile::new(EcLevel::Low, 40).expect("版本合法");
+    let profile = QrProfile::new(EcLevel::Low, 40).expect("the version is legal");
     let Ok(symbol) = profile.encode_payload(&payload) else {
         return;
     };
-    let rendered = symbol.render(4, 4).expect("渲染参数合法");
-    let again = qr::scan::decode_payload(&rendered).expect("自己画的码必须读得回来");
-    assert_eq!(again, payload, "解码再编码的往返不一致");
+    let rendered = symbol.render(4, 4).expect("the render geometry is legal");
+    let again = qr::scan::decode_payload(&rendered).expect("a self-rendered code must read back");
+    assert_eq!(
+        again, payload,
+        "the decode-then-encode round trip is inconsistent"
+    );
 });

@@ -47,7 +47,7 @@ proptest! {
     #[test]
     fn envelope_round_trips(payload in arb_bytes()) {
         let text = envelope::encode(&payload);
-        let decoded = envelope::decode(&text).expect("自己编出来的必须解得开");
+        let decoded = envelope::decode(&text).expect("a self-encoded text must decode");
         prop_assert_eq!(decoded, payload);
     }
 
@@ -62,7 +62,7 @@ proptest! {
     fn envelope_decode_never_panics(text in arb_text()) {
         if let Ok(payload) = envelope::decode(&text) {
             let canonical = envelope::encode(&payload);
-            let again = envelope::decode(&canonical).expect("规范写法必须解得开");
+            let again = envelope::decode(&canonical).expect("the canonical spelling must decode");
             prop_assert_eq!(again, payload);
         }
     }
@@ -88,16 +88,16 @@ proptest! {
     #[cfg(feature = "scan-image")]
     #[test]
     fn qr_round_trips(payload in prop::collection::vec(any::<u8>(), 0..32)) {
-        let profile = QrProfile::new(EcLevel::Low, 5).expect("版本合法");
+        let profile = QrProfile::new(EcLevel::Low, 5).expect("the version is legal");
         match profile.encode_payload(&payload) {
             Ok(symbol) => {
-                let image = symbol.render(4, 4).expect("渲染参数合法");
+                let image = symbol.render(4, 4).expect("the render geometry is legal");
                 let decoded = qualia_transport::qr::scan::decode_payload(&image)
-                    .expect("画出来的码必须读得回来");
+                    .expect("a rendered code must read back");
                 prop_assert_eq!(decoded, payload);
             }
             Err(Error::PayloadTooLarge { .. }) => {}
-            Err(other) => prop_assert!(false, "不该出现的失败：{}", other),
+            Err(other) => prop_assert!(false, "impossible failure: {}", other),
         }
     }
 
@@ -118,30 +118,33 @@ proptest! {
     ) {
         prop_assume!(payload.len().div_ceil(capacity) <= envelope::MAX_FRAMES as usize);
 
-        let frames = frame::encode_frames(&payload, capacity).expect("帧数在上限之内");
+        let frames = frame::encode_frames(&payload, capacity).expect("the frame count is within the limit");
         let expected_frames = payload.len().div_ceil(capacity).max(1);
         prop_assert_eq!(frames.len(), expected_frames);
 
         let mut reassembler = Reassembler::from_first_frame();
         let mut done = None;
         for text in frames.iter().rev() {
-            done = reassembler.push(text).expect("自己拆出来的帧必须收得下");
+            done = reassembler.push(text).expect("a frame it split itself must be accepted");
         }
         prop_assert_eq!(reassembler.received(), expected_frames);
         if expected_frames > 1 {
-            prop_assert!(reassembler.unit_len().is_some(), "多帧时应当观察到满载长度");
+            prop_assert!(
+                reassembler.unit_len().is_some(),
+                "a full frame length must be observed"
+            );
         }
-        let repeated = reassembler.push(&frames[0]).expect("重复扫不算错");
-        prop_assert!(repeated.is_none(), "齐了之后再扫不该又交出一份");
-        prop_assert_eq!(reassembler.received(), expected_frames, "重复不该改变计数");
-        prop_assert_eq!(done.expect("应当拼齐"), payload.as_slice());
+        let repeated = reassembler.push(&frames[0]).expect("a repeated scan is not an error");
+        prop_assert!(repeated.is_none(), "scanning again after completion must not hand out another");
+        prop_assert_eq!(reassembler.received(), expected_frames, "a repeat must not change the count");
+        prop_assert_eq!(done.expect("must reassemble"), payload.as_slice());
 
         let mut reassembler = Reassembler::new(capacity);
         let mut done = None;
         for text in &frames {
-            done = reassembler.push(text).expect("按容量拆的帧必须收得下");
+            done = reassembler.push(text).expect("such a frame must be accepted");
         }
-        prop_assert_eq!(done.expect("应当拼齐"), payload);
+        prop_assert_eq!(done.expect("must reassemble"), payload);
     }
 
     /// Every frame text produced by the splitter stays **inside** the QR alphanumeric mode.
@@ -158,12 +161,12 @@ proptest! {
         const ALPHANUMERIC: &str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
         prop_assume!(payload.len().div_ceil(capacity) <= envelope::MAX_FRAMES as usize);
 
-        let frames = frame::encode_frames(&payload, capacity).expect("帧数在上限之内");
+        let frames = frame::encode_frames(&payload, capacity).expect("the frame count is within the limit");
         prop_assert!(
             frames.iter().all(|text| text
                 .chars()
                 .all(|character| ALPHANUMERIC.contains(character))),
-            "帧文本里出现了字母数字模式之外的字符"
+            "the frame text contains a character outside the alphanumeric mode"
         );
     }
 
@@ -178,7 +181,7 @@ proptest! {
     fn reassembler_never_panics_on_arbitrary_text(text in arb_text()) {
         let mut reassembler = Reassembler::from_first_frame();
         if let Ok(Some(bytes)) = reassembler.push(&text) {
-            let frame = frame::decode_frame(&text).expect("刚解开过的文本必须解得开");
+            let frame = frame::decode_frame(&text).expect("a text that just decoded must decode");
             prop_assert_eq!(frame.total, 1);
             prop_assert_eq!(bytes, frame.payload);
         }

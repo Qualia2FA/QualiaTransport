@@ -257,7 +257,10 @@ mod tests {
         for (seed, port) in [(0_u8, 1_u16), (0xFF, u16::MAX), (1, 1024), (0x80, 21_377)] {
             let address = LanAddress::new(endpoint(seed), port);
             let decoded = LanAddress::decode(&address.encode()).expect("round trip");
-            assert_eq!(decoded, address, "round trip mismatch for seed {seed} port {port}");
+            assert_eq!(
+                decoded, address,
+                "round trip mismatch for seed {seed} port {port}"
+            );
         }
     }
 
@@ -287,7 +290,10 @@ mod tests {
             bad.resize(length, 0);
             let result = LanAddress::decode(&bad);
             let is_length = matches!(result, Err(Error::BadLanAddressLength { .. }));
-            assert!(is_length, "{length} bytes must report a bad length, got {result:?}");
+            assert!(
+                is_length,
+                "{length} bytes must report a bad length, got {result:?}"
+            );
         }
 
         let mut newer = good;
@@ -298,13 +304,19 @@ mod tests {
             Err(Error::UnsupportedDatagramVersion { found, supported })
                 if found == ADDRESS_VERSION + 1 && supported == ADDRESS_VERSION
         );
-        assert!(is_version, "should report a version newer than this build, got {result:?}");
+        assert!(
+            is_version,
+            "should report a version newer than this build, got {result:?}"
+        );
 
         let mut corrupted = good;
         corrupted[10] ^= 0x01;
         let result = LanAddress::decode(&corrupted);
         let is_checksum = matches!(result, Err(Error::MalformedFrameHeader));
-        assert!(is_checksum, "a mistyped byte must be caught by the checksum, got {result:?}");
+        assert!(
+            is_checksum,
+            "a mistyped byte must be caught by the checksum, got {result:?}"
+        );
     }
 
     /// The checksum must be sensitive to every covered bit.

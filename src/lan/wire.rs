@@ -545,19 +545,19 @@ mod tests {
 
         assert_eq!(bytes.len(), DATAGRAM_LEN);
         assert_eq!(&bytes[0..8], b"Q2FALAN\0");
-        assert_eq!(bytes[8], 1, "版本");
+        assert_eq!(bytes[8], 1, "version");
         assert_eq!(bytes[9], 0x01, "Hello");
         assert_eq!(
             &bytes[10..18],
             &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
-            "序号是大端"
+            "the sequence is big-endian"
         );
-        assert_eq!(&bytes[18..50], &[0xAA; 32], "设备标识");
-        assert_eq!(&bytes[50..82], &[0xBB; 32], "端点公钥");
-        assert_eq!(&bytes[82..84], &[0xCC, 0xDD], "端口是大端");
+        assert_eq!(&bytes[18..50], &[0xAA; 32], "device id");
+        assert_eq!(&bytes[50..82], &[0xBB; 32], "endpoint key");
+        assert_eq!(&bytes[82..84], &[0xCC, 0xDD], "the port is big-endian");
 
         assert_eq!(
-            Announcement::decode(&bytes).expect("自己编的必须解得开"),
+            Announcement::decode(&bytes).expect("a self-encoded datagram must decode"),
             announcement
         );
     }
@@ -567,8 +567,11 @@ mod tests {
         for kind in [Kind::Hello, Kind::Bye] {
             let mut announcement = hello(7, 42);
             announcement.kind = kind;
-            let decoded = Announcement::decode(&announcement.encode()).expect("往返");
-            assert_eq!(decoded, announcement, "种类 {kind:?} 往返不一致");
+            let decoded = Announcement::decode(&announcement.encode()).expect("round trip");
+            assert_eq!(
+                decoded, announcement,
+                "round trip mismatch for kind {kind:?}"
+            );
         }
     }
 
@@ -578,7 +581,7 @@ mod tests {
         for (sequence, port) in [(0_u64, 1_u16), (u64::MAX, u16::MAX), (1, 0)] {
             let mut announcement = hello(1, sequence);
             announcement.port = port;
-            let decoded = Announcement::decode(&announcement.encode()).expect("往返");
+            let decoded = Announcement::decode(&announcement.encode()).expect("round trip");
             assert_eq!(decoded.sequence, sequence);
             assert_eq!(decoded.port, port);
         }
@@ -591,13 +594,16 @@ mod tests {
             b"".as_slice(),
             b"hello",
             b"GET / HTTP/1.1\r\n",
-            b"Q2FALAN",       // 魔数只差一点，但长度不够
-            b"q2falan\0",     // 大小写敏感
-            b"Q2FASYN\0\x01", // 核心库同步载荷的魔数
+            b"Q2FALAN",       // the magic differs by one byte, and the length is short
+            b"q2falan\0",     // case-sensitive
+            b"Q2FASYN\0\x01", // the magic of the core library's sync payload
         ] {
             let result = Announcement::decode(datagram);
             let is_foreign = matches!(result, Err(Error::NotOurDatagram));
-            assert!(is_foreign, "应当报「不是我们的报文」，实际 {result:?}");
+            assert!(
+                is_foreign,
+                "should report a foreign datagram, got {result:?}"
+            );
         }
     }
 
@@ -613,7 +619,10 @@ mod tests {
             bad.resize(length, 0);
             let result = Announcement::decode(&bad);
             let is_length = matches!(result, Err(Error::BadDatagramLength { .. }));
-            assert!(is_length, "{length} 字节应当报长度不对，实际 {result:?}");
+            assert!(
+                is_length,
+                "{length} bytes must report a bad length, got {result:?}"
+            );
         }
 
         let mut newer = good;
@@ -624,14 +633,17 @@ mod tests {
             Err(Error::UnsupportedDatagramVersion { found, supported })
                 if found == VERSION + 1 && supported == VERSION
         );
-        assert!(is_version, "应当报版本比本机新，实际 {result:?}");
+        assert!(
+            is_version,
+            "should report a version newer than this build, got {result:?}"
+        );
 
         let mut unknown = good;
         unknown[8] = VERSION;
         unknown[9] = 0x7F;
         let result = Announcement::decode(&unknown);
         let is_kind = matches!(result, Err(Error::UnknownDatagramKind { kind: 0x7F }));
-        assert!(is_kind, "应当报种类不认识，实际 {result:?}");
+        assert!(is_kind, "should report an unknown kind, got {result:?}");
     }
 
     /// Multicast noise must not make the parser panic or accept.
@@ -661,7 +673,10 @@ mod tests {
     fn the_view_reports_who_is_here() {
         let mut view = LanView::new();
         assert!(view.is_empty());
-        assert!(view.observe(hello(1, 0), 1_000), "第一条公告必须被收下");
+        assert!(
+            view.observe(hello(1, 0), 1_000),
+            "the first announcement must be accepted"
+        );
         assert_eq!(view.len(), 1);
 
         assert!(view.observe(hello(2, 0), 1_000));
@@ -669,17 +684,21 @@ mod tests {
 
         assert!(
             !view.observe(hello(1, 0), 2_000),
-            "同一序号重复到达不该算新消息"
+            "a repeat with the same sequence must not count as news"
         );
         assert_eq!(
-            view.get(&device(1).0).expect("在视图里").last_seen_ms,
+            view.get(&device(1).0)
+                .expect("must be in the view")
+                .last_seen_ms,
             1_000,
-            "被忽略的公告不该刷新时间戳"
+            "an ignored announcement must not refresh the timestamp"
         );
 
         assert!(view.observe(hello(1, 1), 2_000));
         assert_eq!(
-            view.get(&device(1).0).expect("在视图里").last_seen_ms,
+            view.get(&device(1).0)
+                .expect("must be in the view")
+                .last_seen_ms,
             2_000
         );
     }
@@ -699,16 +718,32 @@ mod tests {
         let mut bye = hello(5, 1);
         bye.kind = Kind::Bye;
         assert!(view.observe(bye, 2_000));
-        assert!(view.here().is_empty(), "说过再见的设备不该还算「在这里」");
-        assert_eq!(view.len(), 1, "但他仍在视图里——序号水位要留着");
-        assert_eq!(view.get(&id).expect("在视图里").status, PeerStatus::Left);
+        assert!(
+            view.here().is_empty(),
+            "a device that said goodbye must not still count as here"
+        );
+        assert_eq!(
+            view.len(),
+            1,
+            "but it stays in the view — the sequence watermark must be kept"
+        );
+        assert_eq!(
+            view.get(&id).expect("must be in the view").status,
+            PeerStatus::Left
+        );
 
-        assert!(!view.observe(hello(5, 0), 3_000), "序号倒退不算新消息");
+        assert!(
+            !view.observe(hello(5, 0), 3_000),
+            "a lower sequence is not news"
+        );
         assert!(view.here().is_empty());
 
         assert!(view.observe(hello(5, 2), 4_000));
         assert_eq!(view.here().len(), 1);
-        assert_eq!(view.get(&id).expect("在视图里").status, PeerStatus::Here);
+        assert_eq!(
+            view.get(&id).expect("must be in the view").status,
+            PeerStatus::Here
+        );
     }
 
     /// Lease: a peer that stays quiet stops counting as here but is **not** deleted, and
@@ -721,16 +756,20 @@ mod tests {
 
         assert!(
             view.expire(1_000 + LanView::STALE_AFTER_MS).is_empty(),
-            "刚好到期不算过期"
+            "exactly at the deadline is not yet expired"
         );
         let expired = view.expire(1_000 + LanView::STALE_AFTER_MS + 1);
         assert_eq!(expired.len(), 2);
         assert!(view.here().is_empty());
-        assert_eq!(view.len(), 2, "水位必须留着，否则旧公告可以被重放");
+        assert_eq!(
+            view.len(),
+            2,
+            "the watermark must be kept, otherwise old announcements can be replayed"
+        );
 
         assert!(
             view.expire(999_999).is_empty(),
-            "同一个对端只该被报一次过期"
+            "a peer must be reported expired only once"
         );
     }
 
@@ -752,7 +791,7 @@ mod tests {
 
         let later = LanView::STALE_AFTER_MS + 1;
         assert_eq!(first.expire(later), vec![id]);
-        let expired = first.get(&id).expect("还在视图里");
+        let expired = first.get(&id).expect("must still be in the view");
 
         let mut second = LanView::new();
         second.observe(hello(1, 0), 0);
@@ -765,10 +804,13 @@ mod tests {
             endpoint_key: expired.endpoint_key,
             port: expired.port,
         };
-        assert!(second.observe(replay, later), "过期通知必须被当成新消息");
+        assert!(
+            second.observe(replay, later),
+            "an expiry notice must be treated as news"
+        );
         assert!(second.here().is_empty());
         assert_eq!(
-            second.get(&id).expect("还在视图里").status,
+            second.get(&id).expect("must still be in the view").status,
             PeerStatus::Left
         );
     }
@@ -788,8 +830,8 @@ mod tests {
         expired.observe(hello(2, 0), 0);
         expired.expire(LanView::STALE_AFTER_MS + 1);
 
-        let said = said.get(&id).expect("在视图里");
-        let expired = expired.get(&id).expect("在视图里");
+        let said = said.get(&id).expect("must be in the view");
+        let expired = expired.get(&id).expect("must be in the view");
         assert_eq!(said.status, expired.status);
         assert_eq!(said.endpoint_key, expired.endpoint_key);
         assert_eq!(said.port, expired.port);
@@ -826,7 +868,10 @@ mod tests {
         let expected: Vec<DeviceId> = (1..=3).map(|seed| device(seed).0).collect();
         for (index, view) in views.iter().enumerate() {
             let here: Vec<DeviceId> = view.here().into_iter().map(|peer| peer.device).collect();
-            assert_eq!(here, expected, "第 {index} 台设备的视图没有收敛");
+            assert_eq!(
+                here, expected,
+                "the view of device {index} did not converge"
+            );
         }
     }
 
@@ -870,7 +915,7 @@ mod tests {
         assert_eq!(
             view.len(),
             LanView::MAX_PEERS,
-            "视图必须停在 MAX_PEERS 个对端，而不是跟着输入一起长"
+            "the view must stop at MAX_PEERS peers instead of growing with the input"
         );
     }
 
@@ -901,9 +946,18 @@ mod tests {
         );
 
         assert_eq!(view.len(), LanView::MAX_PEERS);
-        assert!(view.get(&newcomer).is_some(), "新来的必须在名单里");
-        assert!(view.get(&device_at(0)).is_none(), "最不活跃的应当被顶掉");
-        assert!(view.get(&device_at(1)).is_some(), "次旧的还在");
+        assert!(
+            view.get(&newcomer).is_some(),
+            "the newcomer must be in the list"
+        );
+        assert!(
+            view.get(&device_at(0)).is_none(),
+            "the least active one must be evicted"
+        );
+        assert!(
+            view.get(&device_at(1)).is_some(),
+            "the next oldest is still there"
+        );
     }
 
     /// After eviction the **same peer can come back**, because its sequence watermark went
@@ -922,7 +976,7 @@ mod tests {
 
         assert!(
             !view.observe(announcement_for(victim), 0),
-            "水位还在时序号倒退被挡"
+            "a lower sequence is blocked while the watermark is there"
         );
 
         view.observe(
@@ -935,10 +989,13 @@ mod tests {
             },
             LanView::MAX_PEERS as u64 + 1,
         );
-        assert!(view.get(&victim).is_none(), "牺牲者应当已经被顶掉");
+        assert!(
+            view.get(&victim).is_none(),
+            "the victim must have been evicted"
+        );
         assert!(
             view.observe(announcement_for(victim), 0),
-            "水位没了，旧序号又能进来"
+            "the watermark is gone, so the old sequence gets in again"
         );
     }
 
@@ -969,11 +1026,17 @@ mod tests {
         let mut view = LanView::new();
         let (id, _) = device(4);
         view.observe(hello(4, 100), 1_000);
-        assert!(!view.observe(hello(4, 0), 2_000), "序号倒退被挡");
+        assert!(
+            !view.observe(hello(4, 0), 2_000),
+            "a lower sequence is blocked"
+        );
 
         assert!(view.forget(&id));
         assert!(view.is_empty());
-        assert!(view.observe(hello(4, 0), 3_000), "水位没了，旧公告又能进来");
+        assert!(
+            view.observe(hello(4, 0), 3_000),
+            "the watermark is gone, so the old announcement gets in again"
+        );
     }
 
     /// The debug output prints only the first 8 bytes, so that a log line does not carry

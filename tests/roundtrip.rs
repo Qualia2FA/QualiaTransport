@@ -49,22 +49,25 @@ fn round_trip(profile: &QrProfile, len: usize) {
     let payload = pseudo_random(len);
     let symbol = profile
         .encode_payload(&payload)
-        .unwrap_or_else(|error| panic!("{len} 字节应当装得下：{error}"));
+        .unwrap_or_else(|error| panic!("{len} bytes must fit: {error}"));
     assert!(
         symbol.version() <= profile.max_version(),
-        "编出了 {} 版，超过声明的上限 {}",
+        "encoded version {}, above the declared limit {}",
         symbol.version(),
         profile.max_version()
     );
-    let image = symbol.render(4, 4).expect("渲染参数合法");
+    let image = symbol.render(4, 4).expect("the render geometry is legal");
     let decoded = qr::scan::decode_payload(&image).unwrap_or_else(|error| {
         panic!(
-            "从图里读不回来（{} 版、纠错 {}、{len} 字节）：{error}",
+            "cannot read it back from the image (version {}, ec {}, {len} bytes): {error}",
             symbol.version(),
             symbol.ec_level().letter()
         )
     });
-    assert_eq!(decoded, payload, "读回来的载荷与编进去的不一致");
+    assert_eq!(
+        decoded, payload,
+        "the payload read back differs from the one encoded"
+    );
 }
 
 /// Four error-correction levels × versions from the smallest to the largest: **each** one must
@@ -83,7 +86,7 @@ fn every_profile_round_trips_through_pixels() {
         (EcLevel::Low, 40),
     ];
     for (ec, max_version) in profiles {
-        let profile = QrProfile::new(ec, max_version).expect("版本合法");
+        let profile = QrProfile::new(ec, max_version).expect("the version is legal");
         let capacity = profile.payload_capacity();
         for len in [1, capacity / 2, capacity] {
             round_trip(&profile, len);
@@ -98,10 +101,10 @@ fn every_profile_round_trips_through_pixels() {
 /// verifies that the decoder **locates** the code instead of assuming it fills the whole image.
 #[test]
 fn a_code_inside_a_larger_canvas_is_still_found() {
-    let profile = QrProfile::new(EcLevel::Medium, 10).expect("版本合法");
+    let profile = QrProfile::new(EcLevel::Medium, 10).expect("the version is legal");
     let payload = pseudo_random(40);
-    let symbol = profile.encode_payload(&payload).expect("装得下");
-    let code = symbol.render(4, 4).expect("渲染参数合法");
+    let symbol = profile.encode_payload(&payload).expect("must fit");
+    let code = symbol.render(4, 4).expect("the render geometry is legal");
 
     let offset = 60_u32;
     let width = code.width() + 2 * offset;
@@ -109,13 +112,14 @@ fn a_code_inside_a_larger_canvas_is_still_found() {
     let mut canvas = vec![u8::MAX; (width as usize) * (height as usize)];
     for y in 0..code.height() {
         for x in 0..code.width() {
-            let source = code.pixel(x, y).expect("坐标在界内");
+            let source = code.pixel(x, y).expect("the coordinates are in bounds");
             let index = ((y + offset) as usize) * (width as usize) + (x + offset) as usize;
             canvas[index] = source;
         }
     }
-    let canvas = GrayImage::from_luma8(width, height, canvas).expect("尺寸自洽");
-    let decoded = qr::scan::decode_payload(&canvas).expect("大画布里的码也应当找得到");
+    let canvas = GrayImage::from_luma8(width, height, canvas).expect("the size is consistent");
+    let decoded =
+        qr::scan::decode_payload(&canvas).expect("a code on a larger canvas must also be found");
     assert_eq!(decoded, payload);
 }
 
@@ -129,29 +133,30 @@ fn a_code_inside_a_larger_canvas_is_still_found() {
 fn someone_elses_qr_is_reported_as_foreign() {
     let url = "https://example.com/not-ours";
     let code = qrcodegen::QrCode::encode_text(url, qrcodegen::QrCodeEcc::Medium)
-        .expect("短文本一定装得下");
+        .expect("a short text always fits");
     let image = render_foreign(&code, 6, 4);
 
-    let text = qr::scan::decode_text(&image).expect("这张码本身是好的");
-    assert_eq!(text, url, "读出来的应当是原文");
+    let text = qr::scan::decode_text(&image).expect("this code itself is fine");
+    assert_eq!(text, url, "the text read back must be the original");
 
     let result = qr::scan::decode_payload(&image);
     let is_foreign = matches!(result, Err(Error::NotOurQrText));
     assert!(
         is_foreign,
-        "别人的码应当报「不是本应用的码」，实际 {result:?}"
+        "someone else's code must report a foreign code, got {result:?}"
     );
 }
 
 /// An image without a code must report [`Error::NoQrFound`], not some decoder-internal error.
 #[test]
 fn a_blank_image_reports_not_found() {
-    let blank = GrayImage::from_luma8(200, 200, vec![u8::MAX; 200 * 200]).expect("尺寸自洽");
+    let blank =
+        GrayImage::from_luma8(200, 200, vec![u8::MAX; 200 * 200]).expect("the size is consistent");
     let result = qr::scan::decode_payload(&blank);
     let is_missing = matches!(result, Err(Error::NoQrFound));
     assert!(
         is_missing,
-        "空白图应当报「没有找到二维码」，实际 {result:?}"
+        "a blank image must report no QR code found, got {result:?}"
     );
     assert!(qr::scan::decode_text(&blank).is_err());
 }
@@ -164,17 +169,20 @@ fn a_blank_image_reports_not_found() {
 #[test]
 fn images_too_small_to_hold_a_qr_are_rejected() {
     for side in [1_u32, 2, 20] {
-        let image =
-            GrayImage::from_luma8(side, side, vec![0; (side * side) as usize]).expect("尺寸自洽");
+        let image = GrayImage::from_luma8(side, side, vec![0; (side * side) as usize])
+            .expect("the size is consistent");
         let payload = qr::scan::decode_payload(&image);
         let text = qr::scan::decode_text(&image);
         let payload_is_missing = matches!(payload, Err(Error::NoQrFound));
         let text_is_missing = matches!(text, Err(Error::NoQrFound));
         assert!(
             payload_is_missing,
-            "{side}×{side} 的图不该有码：{payload:?}"
+            "a {side}×{side} image cannot hold a code: {payload:?}"
         );
-        assert!(text_is_missing, "{side}×{side} 的图不该有码：{text:?}");
+        assert!(
+            text_is_missing,
+            "a {side}×{side} image cannot hold a code: {text:?}"
+        );
     }
 }
 
@@ -192,7 +200,7 @@ fn envelope_text_stays_inside_the_alphanumeric_charset() {
         assert!(
             text.chars()
                 .all(|character| ALPHANUMERIC.contains(character)),
-            "{len} 字节载荷的信封里出现了字母数字模式之外的字符：{text}"
+            "the envelope of a {len}-byte payload leaves the alphanumeric mode: {text}"
         );
     }
 }
@@ -206,7 +214,7 @@ fn envelope_overhead_stays_bounded() {
         let limit = len * 8 / 5 + 20;
         assert!(
             text.len() <= limit,
-            "{len} 字节的信封长 {} 个字符，超过上限 {limit}",
+            "the envelope of {len} bytes is {} characters long, above the limit {limit}",
             text.len()
         );
     }
@@ -216,7 +224,7 @@ fn envelope_overhead_stays_bounded() {
 /// bytes**.
 #[test]
 fn one_byte_over_capacity_is_reported_in_payload_units() {
-    let profile = QrProfile::new(EcLevel::Medium, 8).expect("版本合法");
+    let profile = QrProfile::new(EcLevel::Medium, 8).expect("the version is legal");
     let capacity = profile.payload_capacity();
     let result = profile.encode_payload(&vec![0_u8; capacity + 1]);
     match result {
@@ -224,7 +232,7 @@ fn one_byte_over_capacity_is_reported_in_payload_units() {
             assert_eq!(needed, capacity + 1);
             assert_eq!(limit, capacity);
         }
-        other => panic!("应当报「装不下」，实际 {other:?}"),
+        other => panic!("expected PayloadTooLarge, got {other:?}"),
     }
 }
 
@@ -239,22 +247,22 @@ fn one_byte_over_capacity_is_reported_in_payload_units() {
 /// the reassembler exists for.
 #[test]
 fn a_multi_frame_payload_round_trips_through_pixels() {
-    let profile = QrProfile::new(EcLevel::Low, 10).expect("版本合法");
+    let profile = QrProfile::new(EcLevel::Low, 10).expect("the version is legal");
     let single = profile.payload_capacity();
     let payload = pseudo_random(single + 1);
     let symbols = profile
         .encode_payload_frames(&payload, 4)
-        .expect("两张码装得下这份载荷");
+        .expect("two codes can hold this payload");
     assert!(
         symbols.len() >= 2,
-        "{} 字节超过单帧容量 {single}，应当被拆开，实际 {} 张",
+        "{} bytes exceed the single-frame capacity {single} and must be split, got {} frames",
         payload.len(),
         symbols.len()
     );
     for (index, symbol) in symbols.iter().enumerate() {
         assert!(
             symbol.version() <= profile.max_version(),
-            "第 {} 张编出了 {} 版，超过声明的上限 {}",
+            "frame {} encoded version {}, above the declared limit {}",
             index + 1,
             symbol.version(),
             profile.max_version()
@@ -264,12 +272,21 @@ fn a_multi_frame_payload_round_trips_through_pixels() {
     let mut reassembler = qualia_transport::frame::Reassembler::from_first_frame();
     let mut done = None;
     for symbol in symbols.iter().rev() {
-        let image = symbol.render(4, 4).expect("渲染参数合法");
-        let frame = qr::scan::decode_frame(&image)
-            .unwrap_or_else(|error| panic!("{} 版的码读不回来：{error}", symbol.version()));
-        done = reassembler.accept(frame).expect("每一张都该被收下");
+        let image = symbol.render(4, 4).expect("the render geometry is legal");
+        let frame = qr::scan::decode_frame(&image).unwrap_or_else(|error| {
+            panic!(
+                "the code of version {} cannot be read back: {error}",
+                symbol.version()
+            )
+        });
+        done = reassembler
+            .accept(frame)
+            .expect("every frame must be accepted");
     }
-    assert_eq!(done.expect("两张都扫到了就该拼齐"), payload);
+    assert_eq!(
+        done.expect("both frames scanned means it must reassemble"),
+        payload
+    );
 }
 
 /// A multi-frame code fed to the **single-frame entry** must report "this entry takes single
@@ -281,20 +298,24 @@ fn a_multi_frame_payload_round_trips_through_pixels() {
 /// "this code is only one of several").
 #[test]
 fn the_two_scan_entries_differ_only_in_how_they_treat_multi_frame_codes() {
-    let profile = QrProfile::new(EcLevel::Low, 10).expect("版本合法");
+    let profile = QrProfile::new(EcLevel::Low, 10).expect("the version is legal");
     let payload = pseudo_random(profile.payload_capacity() + 1);
-    let symbols = profile.encode_payload_frames(&payload, 4).expect("拆得开");
+    let symbols = profile
+        .encode_payload_frames(&payload, 4)
+        .expect("must split");
     assert!(symbols.len() >= 2);
 
-    let first = symbols[0].render(4, 4).expect("渲染参数合法");
+    let first = symbols[0]
+        .render(4, 4)
+        .expect("the render geometry is legal");
 
-    let frame = qr::scan::decode_frame(&first).expect("多帧入口必须解得开");
+    let frame = qr::scan::decode_frame(&first).expect("the multi-frame entry point must decode");
     assert_eq!(frame.index, 1);
     assert_eq!(frame.total, symbols.len() as u32);
     assert_eq!(
         frame.payload.len(),
         profile.frame_payload_capacity().min(payload.len()),
-        "第 1 张（非末帧）应当恰好是满载的那一段"
+        "frame 1 (non-final) must be exactly the full chunk"
     );
     assert_eq!(frame.payload[..], payload[..frame.payload.len()]);
 
@@ -302,17 +323,18 @@ fn the_two_scan_entries_differ_only_in_how_they_treat_multi_frame_codes() {
         Err(Error::MultiFrameUnsupported { count }) => {
             assert_eq!(count, symbols.len() as u32);
         }
-        other => panic!("单帧入口应当报「只收单帧」，实际 {other:?}"),
+        other => panic!("expected MultiFrameUnsupported, got {other:?}"),
     }
 
     let single_payload = pseudo_random(8);
-    let single = profile.encode_payload(&single_payload).expect("装得下");
-    let image = single.render(4, 4).expect("渲染参数合法");
+    let single = profile.encode_payload(&single_payload).expect("must fit");
+    let image = single.render(4, 4).expect("the render geometry is legal");
     assert_eq!(
-        qr::scan::decode_payload(&image).expect("单帧入口"),
+        qr::scan::decode_payload(&image).expect("the single-frame entry point"),
         single_payload
     );
-    let frame = qr::scan::decode_frame(&image).expect("多帧入口也收单帧");
+    let frame = qr::scan::decode_frame(&image)
+        .expect("the multi-frame entry point accepts single frames too");
     assert_eq!(frame.index, 1);
     assert_eq!(frame.total, 1);
     assert_eq!(frame.payload, single_payload);
@@ -324,14 +346,14 @@ fn the_two_scan_entries_differ_only_in_how_they_treat_multi_frame_codes() {
 /// It is a separate implementation from `Symbol::render`, so "the code read back matches the one
 /// written out" cannot hold merely because the rendering code shares one misunderstanding.
 fn render_foreign(code: &qrcodegen::QrCode, scale: u32, quiet: u32) -> GrayImage {
-    let modules = u32::try_from(code.size()).expect("边长不会是负数");
+    let modules = u32::try_from(code.size()).expect("the side length cannot be negative");
     let side = (modules + 2 * quiet) * scale;
     let mut pixels = vec![u8::MAX; (side * side) as usize];
     for y in 0..modules {
         for x in 0..modules {
             if !code.get_module(
-                i32::try_from(x).expect("边长很小"),
-                i32::try_from(y).expect("边长很小"),
+                i32::try_from(x).expect("the side length is small"),
+                i32::try_from(y).expect("the side length is small"),
             ) {
                 continue;
             }
@@ -344,7 +366,7 @@ fn render_foreign(code: &qrcodegen::QrCode, scale: u32, quiet: u32) -> GrayImage
             }
         }
     }
-    GrayImage::from_luma8(side, side, pixels).expect("尺寸自洽")
+    GrayImage::from_luma8(side, side, pixels).expect("the size is consistent")
 }
 
 /// **Regression**: decoding this image makes the decoder panic internally, and the image is
@@ -389,7 +411,7 @@ fn a_pathological_image_does_not_take_the_process_down() {
         .cycle()
         .take(needed)
         .collect();
-    let image = GrayImage::from_luma8(width, height, pixels).expect("尺寸自洽");
+    let image = GrayImage::from_luma8(width, height, pixels).expect("the size is consistent");
 
     for result in [
         qr::scan::decode_text(&image).err(),
@@ -398,7 +420,7 @@ fn a_pathological_image_does_not_take_the_process_down() {
     ] {
         assert!(
             matches!(result, Some(Error::QrDecoderPanicked)),
-            "解码器崩过必须被如实报出来，而不是混进「没找到码」或「不是我们的码」：{result:?}"
+            "a decoder panic must be reported as such, not folded into 'no code found': {result:?}"
         );
     }
 }

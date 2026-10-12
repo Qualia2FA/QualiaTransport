@@ -79,18 +79,20 @@ fn check(text: &str) {
     };
 
     let canonical = envelope::encode(&payload);
-    let again = envelope::decode(&canonical).expect("自己编出来的文本必须解得开");
-    assert_eq!(again, payload, "信封往返不一致");
+    let again = envelope::decode(&canonical).expect("a self-encoded text must decode");
+    assert_eq!(again, payload, "the envelope round trip is inconsistent");
 
     assert!(
         canonical.len() <= payload.len() * 8 / 5 + 16,
-        "信封膨胀超出预期：{} 字节的载荷编成了 {} 个字符",
+        "the envelope grew more than expected: a {} byte payload became {} characters",
         payload.len(),
         canonical.len()
     );
 
     assert!(
-        canonical.chars().all(|character| ALPHANUMERIC.contains(character)),
-        "信封里出现了字母数字模式之外的字符：{canonical}"
+        canonical
+            .chars()
+            .all(|character| ALPHANUMERIC.contains(character)),
+        "the envelope left the alphanumeric mode: {canonical}"
     );
 }

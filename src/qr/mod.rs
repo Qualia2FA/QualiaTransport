@@ -486,7 +486,7 @@ impl core::fmt::Debug for Symbol {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "Symbol {{ 版本 {}, 纠错 {}, 掩码 {}, {}×{} }}",
+            "Symbol {{ version {}, ec {}, mask {}, {}×{} }}",
             self.version,
             self.ec.letter(),
             self.mask,
@@ -603,25 +603,26 @@ mod tests {
     #[test]
     fn version_limit_is_respected() {
         for max_version in [1_u8, 2, 5, 10, 20, 40] {
-            let profile = QrProfile::new(EcLevel::Medium, max_version).expect("版本合法");
+            let profile =
+                QrProfile::new(EcLevel::Medium, max_version).expect("the version is legal");
             let capacity = profile.payload_capacity();
             let symbol = profile
                 .encode_payload(&vec![0; capacity])
-                .expect("上限之内必须编得出来");
+                .expect("a payload within the limit must encode");
             assert!(
                 symbol.version() <= max_version,
-                "编出了 {} 版，超过了声明的上限 {max_version}",
+                "encoded version {}, above the declared limit {max_version}",
                 symbol.version()
             );
             assert_eq!(
                 symbol.size(),
                 4 * u16::from(symbol.version()) + 17,
-                "边长与版本不符"
+                "the side length does not match the version"
             );
             assert_eq!(
                 symbol.modules().len(),
                 usize::from(symbol.size()) * usize::from(symbol.size()),
-                "模块数与边长不符"
+                "the module count does not match the side length"
             );
         }
     }
@@ -630,15 +631,22 @@ mod tests {
     /// no symbol.
     #[test]
     fn exceeding_capacity_reports_payload_bytes() {
-        let profile = QrProfile::new(EcLevel::Medium, 10).expect("版本合法");
+        let profile = QrProfile::new(EcLevel::Medium, 10).expect("the version is legal");
         let capacity = profile.payload_capacity();
         let result = profile.encode_payload(&vec![0; capacity + 1]);
         match result {
             Err(Error::PayloadTooLarge { needed, limit }) => {
-                assert_eq!(needed, capacity + 1, "needed 应当是载荷字节数");
-                assert_eq!(limit, capacity, "limit 应当是这条通道的上限");
+                assert_eq!(
+                    needed,
+                    capacity + 1,
+                    "needed must be the payload byte count"
+                );
+                assert_eq!(
+                    limit, capacity,
+                    "limit must be the capacity of this channel"
+                );
             }
-            other => panic!("应当报「装不下」，实际 {other:?}"),
+            other => panic!("expected PayloadTooLarge, got {other:?}"),
         }
     }
 
@@ -657,12 +665,12 @@ mod tests {
             (EcLevel::High, 20),
             (EcLevel::Low, 40),
         ] {
-            let profile = QrProfile::new(ec, max_version).expect("版本合法");
+            let profile = QrProfile::new(ec, max_version).expect("the version is legal");
             let single = profile.payload_capacity();
             let per_frame = profile.frame_payload_capacity();
             assert!(
                 per_frame <= single,
-                "多帧容量不该大于单帧容量：{per_frame} > {single}（{} 版、纠错 {}）",
+                "the multi-frame capacity must not exceed the single-frame one: {per_frame} > {single} (version {}, ec {})",
                 max_version,
                 ec.letter()
             );
@@ -673,10 +681,10 @@ mod tests {
             let payload = vec![0x5A; single * 10];
             let symbols = profile
                 .encode_payload_frames(&payload, 20)
-                .unwrap_or_else(|error| panic!("{} 版应当拆得开：{error}", max_version));
+                .unwrap_or_else(|error| panic!("version {} must split: {error}", max_version));
             assert!(
                 symbols.len() >= 10,
-                "{} 字节在 {} 版的 {single} 字节容量下应当要十张以上，实际 {}",
+                "{} bytes at version {} with a {single}-byte capacity must need ten frames or more, got {}",
                 payload.len(),
                 max_version,
                 symbols.len()
@@ -684,34 +692,34 @@ mod tests {
             for (index, symbol) in symbols.iter().enumerate() {
                 assert!(
                     symbol.version() <= max_version,
-                    "第 {} 张编出了 {} 版，超过声明的上限 {max_version}",
+                    "frame {} encoded version {}, above the declared limit {max_version}",
                     index + 1,
                     symbol.version()
                 );
             }
 
-            let texts = crate::frame::encode_frames(&payload, single).expect("切得开");
+            let texts = crate::frame::encode_frames(&payload, single).expect("must split");
             assert!(
                 texts
                     .iter()
                     .any(|text| encode_within(text, ec, max_version).is_none()),
-                "按单帧容量 {single} 切的帧竟然每一张都编得出来——那说明多帧容量白扣了字符"
+                "every frame split at the single-frame capacity of {single} encoded — the multi-frame capacity deducted characters for nothing"
             );
 
             let many = vec![0x3C; single * 100];
             let symbols = profile
                 .encode_payload_frames(&many, envelope::MAX_FRAMES)
-                .unwrap_or_else(|error| panic!("一百张码应当拆得开：{error}"));
+                .unwrap_or_else(|error| panic!("one hundred codes must split: {error}"));
             assert!(
                 symbols.len() >= 100,
-                "{} 字节应当要一百张以上，实际 {}",
+                "{} bytes must need one hundred frames or more, got {}",
                 many.len(),
                 symbols.len()
             );
             for symbol in &symbols {
                 assert!(
                     symbol.version() <= max_version,
-                    "三位数帧号的那一段编出了 {} 版，超过上限 {max_version}",
+                    "the segment with three-digit frame numbers encoded version {}, above the limit {max_version}",
                     symbol.version()
                 );
             }
@@ -722,13 +730,15 @@ mod tests {
     /// and the multi-frame entry point.
     #[test]
     fn one_frame_payloads_take_the_single_frame_path() {
-        let profile = QrProfile::new(EcLevel::Medium, 12).expect("版本合法");
+        let profile = QrProfile::new(EcLevel::Medium, 12).expect("the version is legal");
         let payload = vec![7_u8; profile.payload_capacity()];
-        let single = profile.encode_payload(&payload).expect("单帧装得下");
+        let single = profile
+            .encode_payload(&payload)
+            .expect("must fit in a single frame");
         let frames = profile
             .encode_payload_frames(&payload, 8)
-            .expect("多帧入口也装得下");
-        assert_eq!(frames.len(), 1, "装得下就不该拆");
+            .expect("must also fit through the multi-frame entry point");
+        assert_eq!(frames.len(), 1, "what fits must not be split");
         assert_eq!(frames[0].modules(), single.modules());
         assert_eq!(frames[0].version(), single.version());
     }
@@ -738,38 +748,45 @@ mod tests {
     /// single-frame capacity.
     #[test]
     fn exchange_capacity_is_the_declared_limit() {
-        let profile = QrProfile::new(EcLevel::Low, 10).expect("版本合法");
+        let profile = QrProfile::new(EcLevel::Low, 10).expect("the version is legal");
         let single = profile.payload_capacity();
         let per_frame = profile.frame_payload_capacity();
 
-        assert_eq!(profile.exchange_capacity(0), 0, "一张都不许用＝装不下");
+        assert_eq!(
+            profile.exchange_capacity(0),
+            0,
+            "no codes allowed means it does not fit"
+        );
         let mut previous = 0;
         for frames in 0..=envelope::MAX_FRAMES {
             let capacity = profile.exchange_capacity(frames);
-            assert!(capacity >= previous, "帧数变多不该让容量变小");
+            assert!(
+                capacity >= previous,
+                "more frames must not shrink the capacity"
+            );
             if frames > 0 {
                 assert!(
                     capacity >= single,
-                    "一张码也是「最多 {frames} 张」的一种用法"
+                    "one code is also a use of 'at most {frames} codes'"
                 );
             }
             assert!(
                 capacity >= per_frame * frames as usize,
-                "{frames} 张码各装 {per_frame} 字节，合起来必须都算得进去"
+                "{frames} codes of {per_frame} bytes each must all count towards the total"
             );
             previous = capacity;
         }
         assert_eq!(
             profile.exchange_capacity(envelope::MAX_FRAMES),
             profile.exchange_capacity(u32::MAX),
-            "超过格式上限的帧数不该换来更多容量"
+            "a frame count above the format limit must not buy more capacity"
         );
     }
 
     /// Exceeding the limit of one exchange reports both numbers in **payload bytes**.
     #[test]
     fn exceeding_the_exchange_capacity_reports_payload_bytes() {
-        let profile = QrProfile::new(EcLevel::Low, 10).expect("版本合法");
+        let profile = QrProfile::new(EcLevel::Low, 10).expect("the version is legal");
         let limit = profile.exchange_capacity(5);
         let payload = vec![0_u8; limit + 1];
         match profile.encode_payload_frames(&payload, 5) {
@@ -780,7 +797,7 @@ mod tests {
                 assert_eq!(needed, payload.len());
                 assert_eq!(reported, limit);
             }
-            other => panic!("应当报「装不下」，实际 {other:?}"),
+            other => panic!("expected PayloadTooLarge, got {other:?}"),
         }
     }
 
@@ -788,7 +805,7 @@ mod tests {
     /// holds for any content.
     #[test]
     fn capacity_is_content_independent() {
-        let profile = QrProfile::new(EcLevel::Quartile, 12).expect("版本合法");
+        let profile = QrProfile::new(EcLevel::Quartile, 12).expect("the version is legal");
         let capacity = profile.payload_capacity();
         let mut pseudo_random = Vec::with_capacity(capacity);
         let mut state: u32 = 0x1234_5678;
@@ -799,7 +816,7 @@ mod tests {
         for payload in [vec![0_u8; capacity], vec![0xff_u8; capacity], pseudo_random] {
             assert!(
                 profile.encode_payload(&payload).is_ok(),
-                "上限长度的载荷必须编得出来（内容不该影响容量）"
+                "a payload of the limit length must encode (the content must not affect the capacity)"
             );
         }
     }
@@ -819,14 +836,14 @@ mod tests {
                 .iter()
                 .map(|&ec| {
                     QrProfile::new(ec, max_version)
-                        .expect("版本合法")
+                        .expect("the version is legal")
                         .payload_capacity()
                 })
                 .collect();
             for pair in capacities.windows(2) {
                 assert!(
                     pair[0] >= pair[1],
-                    "纠错级别升高后容量不该变大：{capacities:?}（版本 {max_version}）"
+                    "a higher error correction level must not increase the capacity: {capacities:?} (version {max_version})"
                 );
             }
         }
@@ -835,14 +852,14 @@ mod tests {
                 .iter()
                 .map(|&version| {
                     QrProfile::new(ec, version)
-                        .expect("版本合法")
+                        .expect("the version is legal")
                         .payload_capacity()
                 })
                 .collect();
             for pair in capacities.windows(2) {
                 assert!(
                     pair[0] <= pair[1],
-                    "版本升高后容量不该变小：{capacities:?}（纠错 {}）",
+                    "a higher version must not shrink the capacity: {capacities:?} (ec {})",
                     ec.letter()
                 );
             }
@@ -853,21 +870,21 @@ mod tests {
     /// 17-byte byte-mode capacity of the bare symbol, but not absurdly small.
     #[test]
     fn smallest_channel_capacity_is_in_a_sane_range() {
-        let profile = QrProfile::new(EcLevel::Low, 1).expect("版本合法");
+        let profile = QrProfile::new(EcLevel::Low, 1).expect("the version is legal");
         let capacity = profile.payload_capacity();
         assert!(
             (8..=15).contains(&capacity),
-            "版本 1 的 L 级应当能装 8–15 字节的载荷，实际 {capacity}"
+            "version 1 at level L must carry 8-15 payload bytes, got {capacity}"
         );
     }
 
     /// Encoding the same payload twice yields the same symbol: version, mask, and modules.
     #[test]
     fn encoding_is_deterministic() {
-        let profile = QrProfile::new(EcLevel::Medium, 20).expect("版本合法");
+        let profile = QrProfile::new(EcLevel::Medium, 20).expect("the version is legal");
         let payload = b"deterministic";
-        let first = profile.encode_payload(payload).expect("编得出来");
-        let second = profile.encode_payload(payload).expect("编得出来");
+        let first = profile.encode_payload(payload).expect("must encode");
+        let second = profile.encode_payload(payload).expect("must encode");
         assert_eq!(first.version(), second.version());
         assert_eq!(first.mask(), second.mask());
         assert_eq!(first.modules(), second.modules());
@@ -889,9 +906,13 @@ mod tests {
             EcLevel::Quartile,
             EcLevel::High,
         ] {
-            assert_eq!(EcLevel::from_letter(ec.letter()).expect("自己给的字母"), ec);
             assert_eq!(
-                EcLevel::from_letter(ec.letter().to_ascii_lowercase()).expect("小写也认"),
+                EcLevel::from_letter(ec.letter()).expect("the letter it returned"),
+                ec
+            );
+            assert_eq!(
+                EcLevel::from_letter(ec.letter().to_ascii_lowercase())
+                    .expect("lower case is accepted too"),
                 ec
             );
         }
@@ -901,28 +922,36 @@ mod tests {
     /// Rendering: image size, quiet zone, and dark modules at the right positions.
     #[test]
     fn render_lays_out_modules_and_quiet_zone() {
-        let profile = QrProfile::new(EcLevel::Low, 1).expect("版本合法");
-        let symbol = profile.encode_payload(b"hi").expect("编得出来");
+        let profile = QrProfile::new(EcLevel::Low, 1).expect("the version is legal");
+        let symbol = profile.encode_payload(b"hi").expect("must encode");
         let scale = 3;
         let quiet = 4;
-        let image = symbol.render(scale, quiet).expect("参数合法");
+        let image = symbol.render(scale, quiet).expect("the geometry is legal");
         let side = (u32::from(symbol.size()) + 2 * u32::from(quiet)) * u32::from(scale);
         assert_eq!(image.width(), side);
         assert_eq!(image.height(), side);
-        assert_eq!(image.pixel(0, 0), Some(255), "左上角应当是静区");
+        assert_eq!(
+            image.pixel(0, 0),
+            Some(255),
+            "the top-left corner must be the quiet zone"
+        );
         assert_eq!(
             image.pixel(side - 1, side - 1),
             Some(255),
-            "右下角应当是静区"
+            "the bottom-right corner must be the quiet zone"
         );
         let origin = u32::from(quiet) * u32::from(scale);
-        assert_eq!(symbol.module(0, 0), Some(true), "定位图案的角必须是深色");
+        assert_eq!(
+            symbol.module(0, 0),
+            Some(true),
+            "the corner of a finder pattern must be dark"
+        );
         for dy in 0..u32::from(scale) {
             for dx in 0..u32::from(scale) {
                 assert_eq!(
                     image.pixel(origin + dx, origin + dy),
                     Some(0),
-                    "模块 ({dx},{dy}) 没有被渲染成深色"
+                    "module ({dx},{dy}) was not rendered dark"
                 );
             }
         }
@@ -930,18 +959,21 @@ mod tests {
 
     #[test]
     fn render_rejects_useless_geometry() {
-        let profile = QrProfile::new(EcLevel::Low, 1).expect("版本合法");
-        let symbol = profile.encode_payload(b"hi").expect("编得出来");
-        assert!(symbol.render(0, 4).is_err(), "缩放为 0 无意义");
-        assert!(symbol.render(1, 3).is_err(), "静区小于 4 会扫不出来");
+        let profile = QrProfile::new(EcLevel::Low, 1).expect("the version is legal");
+        let symbol = profile.encode_payload(b"hi").expect("must encode");
+        assert!(symbol.render(0, 4).is_err(), "a scale of 0 is meaningless");
+        assert!(
+            symbol.render(1, 3).is_err(),
+            "a quiet zone below 4 cannot be scanned"
+        );
         assert!(symbol.render(1, 4).is_ok());
         assert!(symbol.render(u16::MAX, 4).is_err());
     }
 
     #[test]
     fn module_out_of_bounds_is_none() {
-        let profile = QrProfile::new(EcLevel::Low, 1).expect("版本合法");
-        let symbol = profile.encode_payload(b"hi").expect("编得出来");
+        let profile = QrProfile::new(EcLevel::Low, 1).expect("the version is legal");
+        let symbol = profile.encode_payload(b"hi").expect("must encode");
         assert!(symbol.module(symbol.size(), 0).is_none());
         assert!(symbol.module(0, symbol.size()).is_none());
         assert!(symbol.module(0, 0).is_some());
@@ -949,11 +981,14 @@ mod tests {
 
     #[test]
     fn debug_prints_metadata_not_modules() {
-        let profile = QrProfile::new(EcLevel::High, 5).expect("版本合法");
-        let symbol = profile.encode_payload(b"debug").expect("编得出来");
+        let profile = QrProfile::new(EcLevel::High, 5).expect("the version is legal");
+        let symbol = profile.encode_payload(b"debug").expect("must encode");
         let debug = format!("{symbol:?}");
-        assert!(debug.contains("纠错 H"), "应当带上纠错级别：{debug}");
-        assert!(debug.contains('×'), "应当带上边长：{debug}");
-        assert!(debug.len() < 80, "Debug 输出过长：{debug}");
+        assert!(
+            debug.contains("ec H"),
+            "must carry the error correction level: {debug}"
+        );
+        assert!(debug.contains('×'), "must carry the side length: {debug}");
+        assert!(debug.len() < 80, "the Debug output is too long: {debug}");
     }
 }

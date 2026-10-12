@@ -68,11 +68,18 @@ fn check_announcement(data: &[u8]) {
     assert_eq!(
         encoded.len(),
         DATAGRAM_LEN,
-        "编码出来的长度必须是那个加出来的常量"
+        "the encoded length must be the constant summed from the fields"
     );
-    let again = wire::Announcement::decode(&encoded).expect("自己编出来的必须解得开");
-    assert_eq!(again, announcement, "公告往返不一致");
-    assert_eq!(again.encode(), encoded, "往返之后字节必须完全相同");
+    let again = wire::Announcement::decode(&encoded).expect("a self-encoded datagram must decode");
+    assert_eq!(
+        again, announcement,
+        "the announcement round trip is inconsistent"
+    );
+    assert_eq!(
+        again.encode(),
+        encoded,
+        "the bytes must be identical after the round trip"
+    );
 }
 
 /// ② Parse the whole input as a single connection address and check the round trip.
@@ -82,10 +89,17 @@ fn check_address(data: &[u8]) {
     };
 
     let encoded = address.encode();
-    let again = LanAddress::decode(&encoded).expect("自己编出来的必须解得开");
-    assert_eq!(again, address, "连接信息往返不一致");
-    assert_eq!(again.encode(), encoded, "往返之后字节必须完全相同");
-    assert_ne!(address.port, 0, "端口 0 不该被解出来");
+    let again = LanAddress::decode(&encoded).expect("a self-encoded address must decode");
+    assert_eq!(
+        again, address,
+        "the connection info round trip is inconsistent"
+    );
+    assert_eq!(
+        again.encode(),
+        encoded,
+        "the bytes must be identical after the round trip"
+    );
+    assert_ne!(address.port, 0, "port 0 must not be decoded");
 }
 
 /// ③ Cut the input into several announcements and feed them in order to one view, then check the
@@ -118,16 +132,18 @@ fn check_view(data: &[u8]) {
     }
 
     for announcement in &parsed {
-        let peer = view.get(&announcement.device).expect("刚喂进去的必须在视图里");
+        let peer = view
+            .get(&announcement.device)
+            .expect("what was just fed must be in the view");
         let highest = parsed
             .iter()
             .filter(|other| other.device == announcement.device)
             .map(|other| other.sequence)
             .max()
-            .expect("至少有一条");
+            .expect("there is at least one");
         assert_eq!(
             peer.sequence, highest,
-            "视图里的序号水位必须是见过的最大序号"
+            "the sequence watermark in the view must be the highest sequence seen"
         );
     }
 
@@ -135,18 +151,24 @@ fn check_view(data: &[u8]) {
     for announcement in &parsed {
         view.observe(*announcement, 0);
     }
-    assert_eq!(view.all(), before, "重复喂同一批公告不得改变视图");
+    assert_eq!(
+        view.all(),
+        before,
+        "feeding the same announcements twice must not change the view"
+    );
 
     assert!(
         view.len() <= wire::LanView::MAX_PEERS,
-        "视图记住了 {} 个对端，超过上限 {}",
+        "the view remembered {} peers, above the limit {}",
         view.len(),
         wire::LanView::MAX_PEERS
     );
-    let distinct: std::collections::BTreeSet<_> =
-        parsed.iter().map(|announcement| announcement.device).collect();
+    let distinct: std::collections::BTreeSet<_> = parsed
+        .iter()
+        .map(|announcement| announcement.device)
+        .collect();
     assert!(
         view.len() <= distinct.len(),
-        "视图里的对端数不该超过输入里出现过的不同设备数"
+        "the view must not hold more peers than the distinct devices in the input"
     );
 }

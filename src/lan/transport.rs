@@ -859,7 +859,11 @@ mod tests {
         let Ok((sender, received)) = b.receive_timeout(Duration::from_secs(5)) else {
             return;
         };
-        assert_eq!(sender, device(2), "the sender id must come from this device");
+        assert_eq!(
+            sender,
+            device(2),
+            "the sender id must come from this device"
+        );
         assert_eq!(received, payload, "the bytes must arrive unchanged");
     }
 
@@ -1023,7 +1027,8 @@ mod tests {
         assert!(unwrap_message(&[0x7F; 33]).is_err(), "unknown kind");
 
         let me = DeviceId::from_bytes([1; 32]);
-        let (sender, message) = unwrap_message(&wrap(me, b"")).expect("an empty message body is legal");
+        let (sender, message) =
+            unwrap_message(&wrap(me, b"")).expect("an empty message body is legal");
         assert_eq!(sender, me);
         assert!(message.is_empty());
     }
