@@ -159,7 +159,10 @@ pub(crate) fn decode_parts(text: &str) -> Result<(u32, u32, &str)> {
 pub fn decode(text: &str) -> Result<Vec<u8>> {
     let (index, count, body) = decode_parts(text)?;
     if count > 1 {
-        debug_assert!(index <= count, "帧头自洽由 decode_parts 保证");
+        debug_assert!(
+            index <= count,
+            "frame header consistency is guaranteed by decode_parts"
+        );
         return Err(Error::MultiFrameUnsupported { count });
     }
     base32::decode(body)
@@ -197,7 +200,10 @@ mod tests {
         assert_eq!(encode(b"foobar"), "Q2FA1:1/1:MZXW6YTBOI");
         assert_eq!(encode(b"f"), "Q2FA1:1/1:MY");
         assert_eq!(encode(b""), "Q2FA1:1/1:");
-        assert_eq!(decode("Q2FA1:1/1:MZXW6").expect("规范写法"), b"foo");
+        assert_eq!(
+            decode("Q2FA1:1/1:MZXW6").expect("canonical spelling"),
+            b"foo"
+        );
     }
 
     #[test]
@@ -205,7 +211,10 @@ mod tests {
         for len in [0_usize, 1, 5, 6, 31, 64, 255, 1024] {
             let payload: Vec<u8> = (0..len).map(|i| (i * 37 % 256) as u8).collect();
             let text = encode(&payload);
-            assert_eq!(decode(&text).expect("自己编的必须解得开"), payload);
+            assert_eq!(
+                decode(&text).expect("a self-encoded payload must decode"),
+                payload
+            );
         }
     }
 
@@ -223,7 +232,7 @@ mod tests {
         ] {
             let result = decode(text);
             let is_foreign = matches!(result, Err(Error::NotOurQrText));
-            assert!(is_foreign, "应当报「不是本应用的码」，实际 {result:?}");
+            assert!(is_foreign, "should report a foreign code, got {result:?}");
         }
     }
 
@@ -247,7 +256,10 @@ mod tests {
         ] {
             let result = decode(text);
             let is_malformed = matches!(result, Err(Error::MalformedFrameHeader));
-            assert!(is_malformed, "应当报帧头不合法，实际 {result:?}");
+            assert!(
+                is_malformed,
+                "should report a malformed frame header, got {result:?}"
+            );
         }
     }
 
@@ -257,11 +269,14 @@ mod tests {
     fn multi_frame_is_reported_as_unsupported_not_malformed() {
         let result = decode("Q2FA1:1/2:MZXW6");
         let expected = matches!(result, Err(Error::MultiFrameUnsupported { count: 2 }));
-        assert!(expected, "2 帧应当报「尚未支持」，实际 {result:?}");
+        assert!(expected, "2 frames must report unsupported, got {result:?}");
 
         let result = decode("Q2FA1:255/255:MY");
         let expected = matches!(result, Err(Error::MultiFrameUnsupported { count: 255 }));
-        assert!(expected, "255 帧应当是合法帧头，实际 {result:?}");
+        assert!(
+            expected,
+            "255 frames must be a legal frame header, got {result:?}"
+        );
     }
 
     #[test]
@@ -274,14 +289,23 @@ mod tests {
         ] {
             let result = decode(text);
             let is_base32 = matches!(result, Err(Error::MalformedBase32));
-            assert!(is_base32, "应当报 Base32 不合法，实际 {result:?}");
+            assert!(
+                is_base32,
+                "should report a bad Base32 payload, got {result:?}"
+            );
         }
     }
 
     /// A newline added by the scanner must not show the user "this is not our code".
     #[test]
     fn surrounding_whitespace_is_tolerated() {
-        assert_eq!(decode("  Q2FA1:1/1:MZXW6\n").expect("空白宽容"), b"foo");
-        assert_eq!(decode("\tQ2FA1:1/1:MY ").expect("空白宽容"), b"f");
+        assert_eq!(
+            decode("  Q2FA1:1/1:MZXW6\n").expect("whitespace is tolerated"),
+            b"foo"
+        );
+        assert_eq!(
+            decode("\tQ2FA1:1/1:MY ").expect("whitespace is tolerated"),
+            b"f"
+        );
     }
 }

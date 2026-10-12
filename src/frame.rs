@@ -525,17 +525,24 @@ mod tests {
     /// cannot be changed once emitted.
     #[test]
     fn the_frame_texts_are_pinned() {
-        let frames = encode_frames(b"foobar", 3).expect("拆得开");
+        let frames = encode_frames(b"foobar", 3).expect("must split");
         assert_eq!(frames, vec!["Q2FA1:1/2:MZXW6", "Q2FA1:2/2:MJQXE"]);
 
-        let frames = encode_frames(b"foobar", 2).expect("拆得开");
-        assert_eq!(frames.len(), 3, "6 字节按 2 字节切是 3 帧，不是 4 帧");
+        let frames = encode_frames(b"foobar", 2).expect("must split");
+        assert_eq!(
+            frames.len(),
+            3,
+            "6 bytes cut into 2-byte chunks is 3 frames, not 4"
+        );
         assert!(
             frames[0].starts_with("Q2FA1:1/3:") && frames[2].starts_with("Q2FA1:3/3:"),
-            "帧头必须逐字节对：{frames:?}"
+            "the frame header must match byte for byte: {frames:?}"
         );
 
-        assert_eq!(encode_frames(b"", 3).expect("空载荷"), vec!["Q2FA1:1/1:"]);
+        assert_eq!(
+            encode_frames(b"", 3).expect("empty payload"),
+            vec!["Q2FA1:1/1:"]
+        );
     }
 
     /// A single frame takes the same path and its text is unchanged: the
@@ -544,10 +551,10 @@ mod tests {
     #[test]
     fn a_single_frame_still_looks_the_same() {
         assert_eq!(
-            encode_frames(b"foo", 100).expect("一帧够"),
+            encode_frames(b"foo", 100).expect("one frame is enough"),
             vec![envelope::encode(b"foo")]
         );
-        let frame = decode_frame("Q2FA1:1/1:MZXW6").expect("解得开");
+        let frame = decode_frame("Q2FA1:1/1:MZXW6").expect("must decode");
         assert_eq!(frame.index, 1);
         assert_eq!(frame.total, 1);
         assert_eq!(frame.payload, b"foo");
@@ -560,40 +567,56 @@ mod tests {
     #[test]
     fn frames_reassemble_in_any_order() {
         let payload: Vec<u8> = (0..=255_u8).cycle().take(1000).collect();
-        let frames = encode_frames(&payload, 64).expect("拆得开");
-        assert!(frames.len() > 4, "这份载荷应当拆成好几帧");
+        let frames = encode_frames(&payload, 64).expect("must split");
+        assert!(
+            frames.len() > 4,
+            "this payload must split into several frames"
+        );
 
         let mut reassembler = Reassembler::new(64);
         let mut result = None;
         for text in frames.iter().rev() {
-            result = reassembler.push(text).expect("每一张都该被收下");
+            result = reassembler
+                .push(text)
+                .expect("every frame must be accepted");
         }
-        assert_eq!(result.expect("应当拼齐"), payload);
+        assert_eq!(result.expect("must reassemble"), payload);
 
         let mut reassembler = Reassembler::new(64);
         let mut result = None;
         for offset in 0..frames.len() {
             let text = &frames[(offset + 3) % frames.len()];
-            result = reassembler.push(text).expect("每一张都该被收下");
+            result = reassembler
+                .push(text)
+                .expect("every frame must be accepted");
         }
-        assert_eq!(result.expect("应当拼齐"), payload);
+        assert_eq!(result.expect("must reassemble"), payload);
     }
 
     /// Scanning the same frame twice is neither an error nor a change of the
     /// counters.
     #[test]
     fn scanning_the_same_frame_twice_is_not_an_error() {
-        let frames = encode_frames(b"hello world", 4).expect("拆得开");
+        let frames = encode_frames(b"hello world", 4).expect("must split");
         let mut reassembler = Reassembler::new(4);
 
-        assert_eq!(reassembler.push(&frames[0]).expect("第一张"), None);
+        assert_eq!(reassembler.push(&frames[0]).expect("the first frame"), None);
         assert_eq!(reassembler.received(), 1);
         assert_eq!(reassembler.expected_frames(), Some(3));
 
         for _ in 0..3 {
-            assert_eq!(reassembler.push(&frames[0]).expect("重复不算错"), None);
+            assert_eq!(
+                reassembler
+                    .push(&frames[0])
+                    .expect("a repeated frame is not an error"),
+                None
+            );
         }
-        assert_eq!(reassembler.received(), 1, "重复不该把计数推上去");
+        assert_eq!(
+            reassembler.received(),
+            1,
+            "a repeat must not push the counter up"
+        );
         assert_eq!(reassembler.missing(), vec![2, 3]);
     }
 
@@ -601,22 +624,26 @@ mod tests {
     /// the user; an unstable order would make it jump.
     #[test]
     fn the_missing_list_is_accurate_and_sorted() {
-        let frames = encode_frames(&[0_u8; 100], 10).expect("拆得开");
+        let frames = encode_frames(&[0_u8; 100], 10).expect("must split");
         assert_eq!(frames.len(), 10);
 
         let mut reassembler = Reassembler::new(10);
-        assert_eq!(reassembler.expected_frames(), None, "还没扫之前不知道总数");
+        assert_eq!(
+            reassembler.expected_frames(),
+            None,
+            "the total is unknown before the first scan"
+        );
         assert!(reassembler.missing().is_empty());
 
-        reassembler.push(&frames[0]).expect("第一张");
+        reassembler.push(&frames[0]).expect("the first frame");
         assert_eq!(reassembler.missing(), (2..=10).collect::<Vec<u32>>());
 
-        reassembler.push(&frames[4]).expect("第五张");
-        reassembler.push(&frames[9]).expect("第十张");
+        reassembler.push(&frames[4]).expect("the fifth frame");
+        reassembler.push(&frames[9]).expect("the tenth frame");
         assert_eq!(
             reassembler.missing(),
             vec![2, 3, 4, 6, 7, 8, 9],
-            "缺的那几张必须按帧号升序（3 是「第三张」，不是下标 3）"
+            "the missing ones must be in ascending frame order (3 is the third frame, not index 3)"
         );
     }
 
@@ -629,11 +656,11 @@ mod tests {
     /// unchanged, so scanning can continue with the right frame.
     #[test]
     fn the_fullness_rule_rejects_mismatched_frames() {
-        let a = encode_frames(&[0xAA_u8; 30], 8).expect("拆得开");
+        let a = encode_frames(&[0xAA_u8; 30], 8).expect("must split");
 
         let mut short = Reassembler::new(8);
-        short.push(&a[0]).expect("A 的第一张");
-        short.push(&a[1]).expect("A 的第二张");
+        short.push(&a[0]).expect("the first frame of A");
+        short.push(&a[1]).expect("the second frame of A");
         let result = short.accept(Frame {
             index: 3,
             total: 4,
@@ -641,14 +668,14 @@ mod tests {
         });
         assert!(
             matches!(result, Err(Error::FrameMismatch)),
-            "非末帧必须满载，6 字节的第 3 帧应当被抓住，实际 {result:?}"
+            "a non-final frame must be full, so the 6-byte frame 3 must be caught, got {result:?}"
         );
         assert_eq!(short.received(), 2);
-        short.push(&a[2]).expect("接着扫 A 是对的");
-        assert!(short.push(&a[3]).expect("最后一张").is_some());
+        short.push(&a[2]).expect("continuing with A is correct");
+        assert!(short.push(&a[3]).expect("the last frame").is_some());
 
         let mut long = Reassembler::new(8);
-        long.push(&a[0]).expect("A 的第一张");
+        long.push(&a[0]).expect("the first frame of A");
         let result = long.accept(Frame {
             index: 2,
             total: 4,
@@ -656,7 +683,7 @@ mod tests {
         });
         assert!(
             matches!(result, Err(Error::FrameMismatch)),
-            "超过容量的帧应当被抓住，实际 {result:?}"
+            "a frame over the capacity must be caught, got {result:?}"
         );
     }
 
@@ -671,19 +698,23 @@ mod tests {
     /// cryptographic authentication.
     #[test]
     fn two_identically_shaped_payloads_are_indistinguishable_here() {
-        let a = encode_frames(&[0xAA_u8; 24], 8).expect("拆得开");
-        let b = encode_frames(&[0xBB_u8; 24], 8).expect("拆得开");
-        assert_eq!(a.len(), b.len(), "两份形状相同，都是三帧 8 字节");
+        let a = encode_frames(&[0xAA_u8; 24], 8).expect("must split");
+        let b = encode_frames(&[0xBB_u8; 24], 8).expect("must split");
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "both have the same shape: three frames of 8 bytes"
+        );
 
         let mut reassembler = Reassembler::new(8);
-        reassembler.push(&a[0]).expect("A 的第一张");
+        reassembler.push(&a[0]).expect("the first frame of A");
         reassembler
             .push(&b[1])
-            .expect("B 的第二张——长度一样，这里看不出来");
+            .expect("the second frame of B — same length, invisible here");
         let done = reassembler
             .push(&a[2])
-            .expect("A 的第三张")
-            .expect("三帧齐了");
+            .expect("the third frame of A")
+            .expect("all three frames have arrived");
 
         assert_eq!(done.len(), 24);
         assert_ne!(done, vec![0xAA_u8; 24]);
@@ -696,15 +727,15 @@ mod tests {
     /// Frames carrying a different frame count are rejected.
     #[test]
     fn a_different_frame_count_is_caught() {
-        let a = encode_frames(&[0xAA_u8; 30], 8).expect("拆得开");
-        let b = encode_frames(&[0xBB_u8; 10], 8).expect("拆得开");
+        let a = encode_frames(&[0xAA_u8; 30], 8).expect("must split");
+        let b = encode_frames(&[0xBB_u8; 10], 8).expect("must split");
 
         let mut reassembler = Reassembler::new(8);
-        reassembler.push(&a[0]).expect("A 的第一张");
+        reassembler.push(&a[0]).expect("the first frame of A");
         let result = reassembler.push(&b[0]);
         assert!(
             matches!(result, Err(Error::FrameMismatch)),
-            "张数不同必须被抓住，实际 {result:?}"
+            "a different frame count must be caught, got {result:?}"
         );
     }
 
@@ -722,7 +753,7 @@ mod tests {
             let result = reassembler.accept(frame);
             assert!(
                 matches!(result, Err(Error::FrameMismatch)),
-                "{index}/{total} 应当被拒绝，实际 {result:?}"
+                "{index}/{total} must be rejected, got {result:?}"
             );
         }
         assert_eq!(reassembler.received(), 0);
@@ -746,7 +777,7 @@ mod tests {
                 total: 2,
                 payload: vec![1; 4],
             })
-            .expect("第一张");
+            .expect("the first frame");
         let result = reassembler.accept(Frame {
             index: 2,
             total: 2,
@@ -754,7 +785,7 @@ mod tests {
         });
         assert!(
             matches!(result, Err(Error::FrameMismatch)),
-            "多帧里的空末帧必须被拒绝，实际 {result:?}"
+            "an empty final frame inside a multi-frame set must be rejected, got {result:?}"
         );
 
         let mut reassembler = Reassembler::new(8);
@@ -765,7 +796,7 @@ mod tests {
         });
         assert!(
             matches!(result, Err(Error::FrameMismatch)),
-            "多帧里的空首帧必须被拒绝，实际 {result:?}"
+            "an empty first frame inside a multi-frame set must be rejected, got {result:?}"
         );
 
         let mut reassembler = Reassembler::new(8);
@@ -775,14 +806,16 @@ mod tests {
                 total: 1,
                 payload: Vec::new(),
             })
-            .expect("空载荷是合法的单帧");
-        assert_eq!(done.expect("一张就齐了"), Vec::<u8>::new());
+            .expect("an empty payload is a legal single frame");
+        assert_eq!(done.expect("one frame completes the set"), Vec::<u8>::new());
         assert!(reassembler.missing().is_empty());
 
-        let frames = encode_frames(b"", 8).expect("空载荷是一张码");
+        let frames = encode_frames(b"", 8).expect("an empty payload is one code");
         let mut reassembler = Reassembler::new(8);
-        let done = reassembler.push(&frames[0]).expect("自己编的必须收得下");
-        assert_eq!(done.expect("一张就齐了"), Vec::<u8>::new());
+        let done = reassembler
+            .push(&frames[0])
+            .expect("a self-encoded frame must be accepted");
+        assert_eq!(done.expect("one frame completes the set"), Vec::<u8>::new());
     }
 
     /// With an unknown capacity the full-frame length comes from the **first**
@@ -790,7 +823,11 @@ mod tests {
     #[test]
     fn an_unknown_capacity_derives_the_unit_from_the_first_frame() {
         let mut reassembler = Reassembler::from_first_frame();
-        assert_eq!(reassembler.capacity(), usize::MAX, "未知容量不做上界检查");
+        assert_eq!(
+            reassembler.capacity(),
+            usize::MAX,
+            "an unknown capacity performs no upper bound check"
+        );
         assert_eq!(reassembler.unit_len(), None);
 
         reassembler
@@ -799,8 +836,12 @@ mod tests {
                 total: 2,
                 payload: vec![1; 5],
             })
-            .expect("第一帧给出了 unit");
-        assert_eq!(reassembler.unit_len(), Some(5), "unit 应当来自第一帧");
+            .expect("the first frame fixes the unit");
+        assert_eq!(
+            reassembler.unit_len(),
+            Some(5),
+            "the unit must come from the first frame"
+        );
 
         let too_long = Reassembler::from_first_frame();
         let mut too_long = {
@@ -810,7 +851,7 @@ mod tests {
                 total: 2,
                 payload: vec![1; 5],
             })
-            .expect("第一帧");
+            .expect("the first frame");
             it
         };
         let result = too_long.accept(Frame {
@@ -820,7 +861,7 @@ mod tests {
         });
         assert!(
             matches!(result, Err(Error::FrameMismatch)),
-            "末帧长于 unit 必须被拒绝，实际 {result:?}"
+            "a final frame longer than the unit must be rejected, got {result:?}"
         );
 
         let done = reassembler
@@ -829,8 +870,11 @@ mod tests {
                 total: 2,
                 payload: vec![2; 3],
             })
-            .expect("末帧短于 unit 是合法的");
-        assert_eq!(done.expect("拼齐"), [vec![1_u8; 5], vec![2_u8; 3]].concat());
+            .expect("a final frame shorter than the unit is legal");
+        assert_eq!(
+            done.expect("must reassemble"),
+            [vec![1_u8; 5], vec![2_u8; 3]].concat()
+        );
     }
 
     /// **Non-final frames must all have the same length**, whether or not the
@@ -846,7 +890,7 @@ mod tests {
                 total: 3,
                 payload: vec![1; 8],
             })
-            .expect("第一帧 8 字节");
+            .expect("the first frame is 8 bytes");
         let result = reassembler.accept(Frame {
             index: 2,
             total: 3,
@@ -854,9 +898,13 @@ mod tests {
         });
         assert!(
             matches!(result, Err(Error::FrameMismatch)),
-            "第二帧只有 7 字节，必须被拒绝，实际 {result:?}"
+            "the second frame is only 7 bytes and must be rejected, got {result:?}"
         );
-        assert_eq!(reassembler.received(), 1, "出错时状态不变");
+        assert_eq!(
+            reassembler.received(),
+            1,
+            "the state is unchanged on failure"
+        );
     }
 
     /// Exceeding the frame limit reports how many frames are needed and what the
@@ -870,10 +918,10 @@ mod tests {
                 assert_eq!(needed, 256);
                 assert_eq!(limit, envelope::MAX_FRAMES);
             }
-            other => panic!("应当报帧数超过上限，实际 {other:?}"),
+            other => panic!("expected TooManyFrames, got {other:?}"),
         }
 
-        let frames = encode_frames(&vec![0_u8; 255], 1).expect("刚好在上限之内");
+        let frames = encode_frames(&vec![0_u8; 255], 1).expect("exactly at the limit");
         assert_eq!(frames.len(), 255);
         assert_eq!(frames[254], "Q2FA1:255/255:AA");
         assert_eq!(frames[0], "Q2FA1:1/255:AA");
@@ -890,9 +938,12 @@ mod tests {
                 assert_eq!(needed, 1);
                 assert_eq!(limit, 0);
             }
-            other => panic!("应当报「装不下」，实际 {other:?}"),
+            other => panic!("expected PayloadTooLarge, got {other:?}"),
         }
-        assert_eq!(encode_frames(b"", 0).expect("空载荷"), vec!["Q2FA1:1/1:"]);
+        assert_eq!(
+            encode_frames(b"", 0).expect("empty payload"),
+            vec!["Q2FA1:1/1:"]
+        );
     }
 
     /// Text that is not a code of this application is reported as
@@ -903,7 +954,7 @@ mod tests {
             let result = decode_frame(text);
             assert!(
                 matches!(result, Err(Error::NotOurQrText)),
-                "{text} 应当报「不是我们的码」，实际 {result:?}"
+                "{text} must report a foreign code, got {result:?}"
             );
         }
     }
@@ -915,12 +966,18 @@ mod tests {
         let mut reassembler = Reassembler::new(8);
         reassembler
             .push("Q2FA1:1/2:MZXW6YTBOI")
-            .expect("第一张收下");
+            .expect("the first frame is accepted");
         let text = format!("{reassembler:?}");
-        assert!(text.contains("expected: Some(2)"), "实际 {text}");
-        assert!(text.contains("received: 1"), "实际 {text}");
-        assert!(!text.contains("MZXW6"), "帧文本泄露进了 Debug：{text}");
-        assert!(!text.contains("foo"), "帧内容泄露进了 Debug：{text}");
+        assert!(text.contains("expected: Some(2)"), "got {text}");
+        assert!(text.contains("received: 1"), "got {text}");
+        assert!(
+            !text.contains("MZXW6"),
+            "frame text leaked into Debug: {text}"
+        );
+        assert!(
+            !text.contains("foo"),
+            "frame contents leaked into Debug: {text}"
+        );
     }
 
     /// A payload split and reassembled is **byte-for-byte identical** for every
@@ -933,16 +990,18 @@ mod tests {
     fn every_capacity_round_trips() {
         let payload: Vec<u8> = (0..=255_u8).cycle().take(200).collect();
         for capacity in [1_usize, 2, 3, 7, 64, 199, 200, 201, 1000] {
-            let frames = encode_frames(&payload, capacity).expect("拆得开");
+            let frames = encode_frames(&payload, capacity).expect("must split");
             let mut reassembler = Reassembler::new(capacity);
             let mut result = None;
             for text in &frames {
-                result = reassembler.push(text).expect("每一张都该被收下");
+                result = reassembler
+                    .push(text)
+                    .expect("every frame must be accepted");
             }
             assert_eq!(
-                result.expect("应当拼齐"),
+                result.expect("must reassemble"),
                 payload.as_slice(),
-                "容量 {capacity} 下往返不一致"
+                "round trip mismatch at capacity {capacity}"
             );
         }
     }

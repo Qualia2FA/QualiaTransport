@@ -811,12 +811,12 @@ mod tests {
         assert_eq!(
             first.endpoint_key(),
             second.endpoint_key(),
-            "同一把私钥必须派生出同一个端点公钥"
+            "the same secret key must derive the same endpoint key"
         );
         assert_ne!(
             first.endpoint_key(),
             other.endpoint_key(),
-            "不同的私钥必须派生出不同的端点公钥"
+            "different secret keys must derive different endpoint keys"
         );
     }
 
@@ -829,12 +829,12 @@ mod tests {
             return;
         };
         let sockets = lan.bound_sockets();
-        assert!(!sockets.is_empty(), "至少应当绑定一个 socket");
+        assert!(!sockets.is_empty(), "at least one socket must be bound");
         assert_eq!(lan.port(), Some(sockets[0].port()));
         assert_ne!(
             lan.port(),
             Some(0),
-            "端口 0 是「由系统挑」，不是挑完之后的那个值"
+            "port 0 means 'let the system pick', not the value it picked"
         );
     }
 
@@ -859,8 +859,8 @@ mod tests {
         let Ok((sender, received)) = b.receive_timeout(Duration::from_secs(5)) else {
             return;
         };
-        assert_eq!(sender, device(2), "发送方标识必须来自本机");
-        assert_eq!(received, payload, "字节必须原样到达");
+        assert_eq!(sender, device(2), "the sender id must come from this device");
+        assert_eq!(received, payload, "the bytes must arrive unchanged");
     }
 
     /// The reverse direction works as well: a QUIC connection is bidirectional, and on a
@@ -903,7 +903,7 @@ mod tests {
         };
         assert!(
             b.connected_peers().contains(&device(6)),
-            "收到消息之后应当记住这条连接是谁的，实际 {:?}",
+            "the owner of this connection must be remembered after a message arrives, got {:?}",
             b.connected_peers()
         );
     }
@@ -919,7 +919,7 @@ mod tests {
         let result = lan.send(Recipient::One(device(99)), b"x");
         assert!(
             matches!(result, Err(Error::NoConnectionToPeer)),
-            "应当报「没有到该对端的连接」，实际 {result:?}"
+            "should report no connection to that peer, got {result:?}"
         );
     }
 
@@ -939,7 +939,7 @@ mod tests {
                 assert_eq!(limit, MAX_MESSAGE_LEN);
                 assert_eq!(needed, MAX_MESSAGE_LEN + 1);
             }
-            other => panic!("应当报「太大」，实际 {other:?}"),
+            other => panic!("expected PayloadTooLarge, got {other:?}"),
         }
     }
 
@@ -962,11 +962,11 @@ mod tests {
         }
         assert!(
             b.receive_timeout(Duration::from_secs(5)).is_ok(),
-            "已连接的对端应当收到广播"
+            "a connected peer must receive the broadcast"
         );
         assert!(
             c.receive_timeout(Duration::from_secs(1)).is_err(),
-            "没有连接过的对端不该收到任何东西"
+            "a peer that was never connected must receive nothing"
         );
     }
 
@@ -983,12 +983,12 @@ mod tests {
         let result = lan.try_receive();
         assert!(
             matches!(result, Err(Error::TransportEmpty)),
-            "空收件箱应当报「没有消息」，实际 {result:?}"
+            "an empty inbox should report no message, got {result:?}"
         );
         let result = lan.receive_timeout(Duration::from_millis(50));
         assert!(
             matches!(result, Err(Error::TransportEmpty)),
-            "超时应当报「没有消息」，实际 {result:?}"
+            "a timeout should report no message, got {result:?}"
         );
     }
 
@@ -1004,7 +1004,7 @@ mod tests {
         assert_eq!(&framed[1..33], &[0xAB; 32]);
         assert_eq!(&framed[33..], b"body");
 
-        let (sender, message) = unwrap_message(&framed).expect("自己封的必须解得开");
+        let (sender, message) = unwrap_message(&framed).expect("a self-framed message must decode");
         assert_eq!(sender, me);
         assert_eq!(message, b"body");
     }
@@ -1015,15 +1015,15 @@ mod tests {
     /// Pure logic, no sockets.
     #[test]
     fn malformed_envelopes_are_rejected() {
-        assert!(unwrap_message(&[]).is_err(), "空输入应当被拒绝");
+        assert!(unwrap_message(&[]).is_err(), "empty input must be rejected");
         assert!(
             unwrap_message(&[MESSAGE_KIND_HELLO]).is_err(),
-            "只有种类字节"
+            "the kind byte only"
         );
-        assert!(unwrap_message(&[0x7F; 33]).is_err(), "种类不认识");
+        assert!(unwrap_message(&[0x7F; 33]).is_err(), "unknown kind");
 
         let me = DeviceId::from_bytes([1; 32]);
-        let (sender, message) = unwrap_message(&wrap(me, b"")).expect("空消息体合法");
+        let (sender, message) = unwrap_message(&wrap(me, b"")).expect("an empty message body is legal");
         assert_eq!(sender, me);
         assert!(message.is_empty());
     }
@@ -1056,7 +1056,7 @@ mod tests {
         let result = a.send(Recipient::One(device(17)), b"y");
         assert!(
             matches!(result, Err(Error::NoConnectionToPeer)),
-            "忘记之后应当报「没有到该对端的连接」，实际 {result:?}"
+            "after forgetting, it should report no connection to that peer, got {result:?}"
         );
     }
 }

@@ -228,12 +228,12 @@ mod tests {
         assert_eq!(bytes.len(), ADDRESS_LEN);
         assert_eq!(
             ADDRESS_LEN, 42,
-            "前缀 6 + 版本 1 + 公钥 32 + 端口 2 + 校验 1"
+            "prefix 6 + version 1 + endpoint key 32 + port 2 + checksum 1"
         );
         assert_eq!(&bytes[0..6], b"Q2FAL1");
-        assert_eq!(bytes[6], 1, "版本");
-        assert_eq!(&bytes[7..39], &[0xBB; 32], "端点公钥");
-        assert_eq!(&bytes[39..41], &[0x12, 0x34], "端口是大端");
+        assert_eq!(bytes[6], 1, "version");
+        assert_eq!(&bytes[7..39], &[0xBB; 32], "endpoint key");
+        assert_eq!(&bytes[39..41], &[0x12, 0x34], "the port is big-endian");
         let expected = b'Q'
             .wrapping_add(b'2')
             .wrapping_add(b'F')
@@ -244,10 +244,10 @@ mod tests {
             .wrapping_add(0xBB_u8.wrapping_mul(32))
             .wrapping_add(0x12)
             .wrapping_add(0x34);
-        assert_eq!(bytes[41], expected, "校验字节");
+        assert_eq!(bytes[41], expected, "checksum byte");
 
         assert_eq!(
-            LanAddress::decode(&bytes).expect("自己编的必须解得开"),
+            LanAddress::decode(&bytes).expect("a self-encoded record must decode"),
             address
         );
     }
@@ -256,8 +256,8 @@ mod tests {
     fn round_trips_every_boundary() {
         for (seed, port) in [(0_u8, 1_u16), (0xFF, u16::MAX), (1, 1024), (0x80, 21_377)] {
             let address = LanAddress::new(endpoint(seed), port);
-            let decoded = LanAddress::decode(&address.encode()).expect("往返");
-            assert_eq!(decoded, address, "seed {seed} port {port} 往返不一致");
+            let decoded = LanAddress::decode(&address.encode()).expect("round trip");
+            assert_eq!(decoded, address, "round trip mismatch for seed {seed} port {port}");
         }
     }
 
@@ -273,7 +273,7 @@ mod tests {
         ] {
             let result = LanAddress::decode(bytes);
             let is_foreign = matches!(result, Err(Error::NotOurLanAddress));
-            assert!(is_foreign, "应当报「不是我们的连接信息」，实际 {result:?}");
+            assert!(is_foreign, "should report a foreign record, got {result:?}");
         }
     }
 
@@ -287,7 +287,7 @@ mod tests {
             bad.resize(length, 0);
             let result = LanAddress::decode(&bad);
             let is_length = matches!(result, Err(Error::BadLanAddressLength { .. }));
-            assert!(is_length, "{length} 字节应当报长度不对，实际 {result:?}");
+            assert!(is_length, "{length} bytes must report a bad length, got {result:?}");
         }
 
         let mut newer = good;
@@ -298,13 +298,13 @@ mod tests {
             Err(Error::UnsupportedDatagramVersion { found, supported })
                 if found == ADDRESS_VERSION + 1 && supported == ADDRESS_VERSION
         );
-        assert!(is_version, "应当报版本比本机新，实际 {result:?}");
+        assert!(is_version, "should report a version newer than this build, got {result:?}");
 
         let mut corrupted = good;
         corrupted[10] ^= 0x01;
         let result = LanAddress::decode(&corrupted);
         let is_checksum = matches!(result, Err(Error::MalformedFrameHeader));
-        assert!(is_checksum, "抄错的字节应当被校验抓到，实际 {result:?}");
+        assert!(is_checksum, "a mistyped byte must be caught by the checksum, got {result:?}");
     }
 
     /// The checksum must be sensitive to every covered bit.
@@ -323,7 +323,7 @@ mod tests {
                 let result = LanAddress::decode(&corrupted);
                 assert!(
                     matches!(result, Err(Error::MalformedFrameHeader)),
-                    "第 {index} 字节第 {bit} 位翻掉之后未被抓到，实际 {result:?}"
+                    "flipping bit {bit} of byte {index} was not caught, got {result:?}"
                 );
             }
         }
@@ -345,7 +345,7 @@ mod tests {
 
         let result = LanAddress::decode(&bytes);
         let is_zero = matches!(result, Err(Error::ZeroPort));
-        assert!(is_zero, "应当报端口为 0，实际 {result:?}");
+        assert!(is_zero, "should report port 0, got {result:?}");
     }
 
     /// No input may make the parser panic, and no input may make it accept a record.

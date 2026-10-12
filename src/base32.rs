@@ -135,12 +135,12 @@ mod tests {
             assert_eq!(
                 encode(data),
                 *expected,
-                "编码与 RFC 4648 §10 不符：{data:?}"
+                "encoding does not match RFC 4648 §10: {data:?}"
             );
             assert_eq!(
-                decode(expected).expect("规范向量必须解得开"),
+                decode(expected).expect("a specification vector must decode"),
                 *data,
-                "解码与 RFC 4648 §10 不符：{expected}"
+                "decoding does not match RFC 4648 §10: {expected}"
             );
         }
     }
@@ -149,16 +149,16 @@ mod tests {
     #[test]
     fn padded_and_lowercase_forms_decode() {
         assert_eq!(
-            decode("MZXW6YTBOI======").expect("填充合法"),
+            decode("MZXW6YTBOI======").expect("padding is legal"),
             b"foobar",
-            "带填充的规范写法应当解得开"
+            "the padded canonical spelling must decode"
         );
         assert_eq!(
-            decode("mzxw6ytboi").expect("小写合法"),
+            decode("mzxw6ytboi").expect("lower case is legal"),
             b"foobar",
-            "大小写不敏感"
+            "decoding is case-insensitive"
         );
-        assert_eq!(decode("  MZXW6  ").expect("空白合法"), b"foo");
+        assert_eq!(decode("  MZXW6  ").expect("whitespace is legal"), b"foo");
     }
 
     /// Text whose length remainder is 1/3/6 cannot be produced by any byte string and must be
@@ -166,7 +166,10 @@ mod tests {
     #[test]
     fn rejects_impossible_lengths() {
         for text in ["A", "AAA", "AAAAAA"] {
-            assert!(decode(text).is_err(), "长度非法的文本被接受了：{text:?}");
+            assert!(
+                decode(text).is_err(),
+                "text of impossible length was accepted: {text:?}"
+            );
         }
     }
 
@@ -174,11 +177,12 @@ mod tests {
     /// former is the canonical spelling.
     #[test]
     fn rejects_non_canonical_tail_bits() {
-        assert_eq!(decode("MY").expect("规范写法"), b"f");
+        assert_eq!(decode("MY").expect("canonical spelling"), b"f");
         assert!(
             decode("MZ").is_err(),
-            "把尾比特改一位就得到另一个文本，它必须被拒绝——否则同一份字节有多个\
-             合法写法，去重与重放记账就失去依据"
+            "flipping one tail bit yields another text, and it must be rejected — otherwise \
+             the same bytes have several legal spellings and deduplication and replay \
+             accounting lose their basis"
         );
     }
 
@@ -187,7 +191,10 @@ mod tests {
     #[test]
     fn rejects_characters_outside_the_alphabet() {
         for text in ["M0", "M1", "M8", "M9", "M!", "M ", "M-", "M_", "Mé"] {
-            assert!(decode(text).is_err(), "非法字符被接受了：{text:?}");
+            assert!(
+                decode(text).is_err(),
+                "illegal character was accepted: {text:?}"
+            );
         }
     }
 
@@ -196,7 +203,7 @@ mod tests {
     /// crate does not decide it on its behalf).
     #[test]
     fn empty_text_decodes_to_empty_bytes() {
-        assert_eq!(decode("").expect("空载荷"), b"");
+        assert_eq!(decode("").expect("empty payload"), b"");
         assert_eq!(encode(&[]), "");
     }
 }

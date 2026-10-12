@@ -184,7 +184,7 @@ impl core::fmt::Debug for GrayImage {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "GrayImage {{ {}×{}, {} 字节 }}",
+            "GrayImage {{ {}×{}, {} bytes }}",
             self.width,
             self.height,
             self.pixels.len()
@@ -198,12 +198,12 @@ mod tests {
 
     #[test]
     fn luma_round_trips() {
-        let image = GrayImage::from_luma8(2, 2, vec![0, 1, 2, 3]).expect("尺寸自洽");
+        let image = GrayImage::from_luma8(2, 2, vec![0, 1, 2, 3]).expect("the size is consistent");
         assert_eq!(image.width(), 2);
         assert_eq!(image.height(), 2);
         assert_eq!(image.pixel(0, 0), Some(0));
         assert_eq!(image.pixel(1, 1), Some(3));
-        assert_eq!(image.pixel(2, 0), None, "越界必须返回 None");
+        assert_eq!(image.pixel(2, 0), None, "out of bounds must return None");
         assert_eq!(image.pixel(0, 2), None);
     }
 
@@ -220,7 +220,7 @@ mod tests {
         let pixels = vec![
             0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0, 255, 0, 255, 0, 255,
         ];
-        let image = GrayImage::from_rgba8(4, 1, &pixels).expect("尺寸自洽");
+        let image = GrayImage::from_rgba8(4, 1, &pixels).expect("the size is consistent");
         assert_eq!(image.pixel(0, 0), Some(0));
         assert_eq!(image.pixel(1, 0), Some(255));
         assert_eq!(image.pixel(2, 0), Some(76), "0.299 × 255 ≈ 76");
@@ -235,9 +235,9 @@ mod tests {
 
     #[test]
     fn debug_does_not_dump_pixels() {
-        let image = GrayImage::from_luma8(2, 2, vec![7; 4]).expect("尺寸自洽");
+        let image = GrayImage::from_luma8(2, 2, vec![7; 4]).expect("the size is consistent");
         let debug = format!("{image:?}");
-        assert!(debug.contains("2×2"), "应当打印尺寸：{debug}");
-        assert!(!debug.contains('7'), "不应当打印像素：{debug}");
+        assert!(debug.contains("2×2"), "must print the dimensions: {debug}");
+        assert!(!debug.contains('7'), "must not print pixels: {debug}");
     }
 }

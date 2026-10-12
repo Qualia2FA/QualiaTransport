@@ -39,7 +39,7 @@ pub enum Error {
     /// `needed` and `limit` are **both counted in payload bytes** (not in envelope text
     /// characters), because the caller holds the payload as a number of bytes and this "how
     /// much is missing" number is meant to be shown to the user directly.
-    #[error("载荷装不下：需要 {needed} 字节，这条通道最多 {limit} 字节")]
+    #[error("payload does not fit: {needed} bytes needed, this channel carries {limit} bytes")]
     PayloadTooLarge {
         /// Number of bytes that actually have to fit.
         needed: usize,
@@ -55,7 +55,7 @@ pub enum Error {
     ///
     /// The frame limit is fixed by the **format** (the number of decimal digits of
     /// `Q2FA1:<index>/<count>`, see `envelope::MAX_FRAMES`), not by the encoder or the screen.
-    #[error("这份载荷需要 {needed} 张码，而上限是 {limit} 张")]
+    #[error("this payload needs {needed} frames, and the limit is {limit} frames")]
     TooManyFrames {
         /// Number of frames needed (or about to be produced).
         needed: u32,
@@ -68,11 +68,11 @@ pub enum Error {
     /// Separate from "it is our code, but broken", because the two mean completely different
     /// things to the user: the former usually means the user scanned the wrong code
     /// (somebody else's QR code), the latter means rescan or switch channel.
-    #[error("这不是 Qualia2FA 的二维码")]
+    #[error("this is not a Qualia2FA QR code")]
     NotOurQrText,
 
     /// The frame header is invalid (wrong shape, leading zeros, index beyond the count).
-    #[error("二维码文本的帧头不合法")]
+    #[error("the frame header of the QR text is malformed")]
     MalformedFrameHeader,
 
     /// The code is a valid multi-frame code, and this entry point **accepts single frames
@@ -86,7 +86,7 @@ pub enum Error {
     /// it is** rather than pretending the input is corrupt — that is how the caller learns to
     /// switch to the reassembler instead of assuming the user took a blurry photo of the
     /// code.
-    #[error("这张码有 {count} 帧，这条入口只收单帧")]
+    #[error("this code has {count} frames, and this entry point accepts single frames only")]
     MultiFrameUnsupported {
         /// Frame count the text claims.
         count: u32,
@@ -94,25 +94,25 @@ pub enum Error {
 
     /// The Base32 payload is invalid (illegal character, illegal length, or non-canonical
     /// trailing bits).
-    #[error("二维码文本里的 Base32 载荷不合法")]
+    #[error("the Base32 payload in the QR text is malformed")]
     MalformedBase32,
 
     /// The error correction level is not `L`/`M`/`Q`/`H`.
-    #[error("纠错级别 {letter:?} 不是 L/M/Q/H")]
+    #[error("error correction level {letter:?} is not L/M/Q/H")]
     UnknownEcLevel {
         /// The character that was actually received.
         letter: char,
     },
 
     /// The QR version is not within 1–40.
-    #[error("二维码版本 {version} 不在 1–40 之内")]
+    #[error("QR version {version} is not within 1-40")]
     VersionOutOfRange {
         /// The version number that was actually received.
         version: u8,
     },
 
     /// The rendering parameters are invalid.
-    #[error("渲染参数不合法：缩放 {scale} 倍、静区 {quiet_zone} 模块")]
+    #[error("invalid render geometry: scale {scale}, quiet zone {quiet_zone} modules")]
     BadRenderGeometry {
         /// How many pixels each module is enlarged to.
         scale: u16,
@@ -121,7 +121,7 @@ pub enum Error {
     },
 
     /// The image dimensions do not match the pixel count, or the dimensions exceed the limit.
-    #[error("图像尺寸不合法：{width}×{height}，像素 {pixels} 个")]
+    #[error("invalid image geometry: {width}×{height}, {pixels} pixels")]
     BadImageGeometry {
         /// Claimed width, in pixels.
         width: u32,
@@ -136,7 +136,7 @@ pub enum Error {
     /// Separate from [`Error::QrDecode`]: this one means "not even localization succeeded",
     /// rather than "one was found but could not be read". The former usually means the image
     /// contains no code at all (or it is too small or too blurry).
-    #[error("图像里没有找到二维码")]
+    #[error("no QR code was found in the image")]
     NoQrFound,
 
     /// The image decoder **panicked** on this image, and this crate caught it.
@@ -157,18 +157,18 @@ pub enum Error {
     /// Same user-visible handling as "no code in the image": try another image, or scan with
     /// the camera. The difference is that this one **belongs in the log** — it is a pending
     /// upstream defect, not the user scanning the wrong thing.
-    #[error("图像解码器无法处理这张图")]
+    #[error("the image decoder could not handle this image")]
     QrDecoderPanicked,
 
     /// The scanned QR code is not text (and therefore cannot be a code of this application).
-    #[error("扫到的二维码不是文本")]
+    #[error("the scanned QR code is not text")]
     QrNotText,
 
     /// Image decoding failed.
     ///
     /// Present only with the `scan-image` feature, which is its only source.
     #[cfg(feature = "scan-image")]
-    #[error("二维码图像解码失败：{0}")]
+    #[error("QR image decoding failed: {0}")]
     QrDecode(#[from] rqrr::DeQRError),
 
     /// The text is not LAN connection info of this application.
@@ -177,14 +177,14 @@ pub enum Error {
     /// envelope", this one says "the envelope decoded, but it carried something else".
     /// Merging the two would make "somebody else's sync code was scanned" indistinguishable
     /// from "a pairing code was scanned", and the two are handled completely differently.
-    #[error("这不是 Qualia2FA 的局域网连接信息")]
+    #[error("this is not Qualia2FA LAN connection info")]
     NotOurLanAddress,
 
     /// The LAN connection info has the wrong length.
     ///
     /// This structure is **fixed-size**, so a wrong length is bad input and needs no further
     /// guessing.
-    #[error("局域网连接信息长度不对：期望 {expected} 字节，实际 {actual} 字节")]
+    #[error("wrong LAN connection info length: expected {expected} bytes, got {actual} bytes")]
     BadLanAddressLength {
         /// Number of bytes of the fixed-size structure.
         expected: usize,
@@ -197,7 +197,7 @@ pub enum Error {
     /// Port 0 means "let the system pick one", so it **must not** appear in connection info
     /// that has already been established: a peer receiving it could only connect to a
     /// non-existent port.
-    #[error("局域网连接信息里的端口为 0")]
+    #[error("the port in the LAN connection info is 0")]
     ZeroPort,
 
     /// The received UDP datagram is not a lobby datagram of this protocol.
@@ -205,7 +205,7 @@ pub enum Error {
     /// The LAN multicast group is **shared**: other programs on the same subnet may be using
     /// it, and anyone may pour arbitrary bytes into it. A wrong magic number means "not our
     /// datagram" and is simply dropped, not reported as a parse failure.
-    #[error("这不是 Qualia2FA 的大厅报文")]
+    #[error("this is not a Qualia2FA lobby datagram")]
     NotOurDatagram,
 
     /// The kind of the lobby datagram is not recognized.
@@ -214,7 +214,7 @@ pub enum Error {
     /// genuinely our datagram, only **newer than this build**. Folding it into "not our
     /// datagram" would make old clients silently drop a new client's announcements as noise
     /// when a datagram kind is added, and that is a hard class of failure to diagnose.
-    #[error("不认识的大厅报文种类：{kind}")]
+    #[error("unrecognized lobby datagram kind: {kind}")]
     UnknownDatagramKind {
         /// The kind byte that was actually received.
         kind: u8,
@@ -224,7 +224,7 @@ pub enum Error {
     ///
     /// A separate variant for the same reason as [`Error::UnknownDatagramKind`]: it must be
     /// distinguishable from "not our datagram".
-    #[error("大厅报文版本 {found} 比本机支持的 {supported} 新")]
+    #[error("lobby datagram version {found} is newer than the supported {supported}")]
     UnsupportedDatagramVersion {
         /// Version the datagram claims.
         found: u8,
@@ -233,7 +233,7 @@ pub enum Error {
     },
 
     /// The lobby datagram has the wrong length.
-    #[error("大厅报文长度不对：期望 {expected} 字节，实际 {actual} 字节")]
+    #[error("wrong lobby datagram length: expected {expected} bytes, got {actual} bytes")]
     BadDatagramLength {
         /// Number of bytes a datagram of this kind should have.
         expected: usize,
@@ -246,7 +246,7 @@ pub enum Error {
     /// This is not an error state but "nothing yet" — the caller decides from it whether to
     /// keep waiting. Reporting it separately from "the channel is broken" keeps the UI from
     /// showing "no other device on this subnet for now" as a fault.
-    #[error("局域网上还没有发现任何对端")]
+    #[error("no peer has been found on the LAN yet")]
     NoLanPeersFound,
 
     /// A LAN socket operation failed.
@@ -254,7 +254,7 @@ pub enum Error {
     /// Separate from the other variants: this one is an **environment** problem (no network
     /// interface, port already in use, multicast blocked by a firewall), not an input
     /// problem. Merging them would show "network unavailable" as "corrupt datagram".
-    #[error("局域网 socket 操作失败：{operation}")]
+    #[error("LAN socket operation failed: {operation}")]
     LanSocket {
         /// Which operation failed (`bind` / `join_multicast` / `send_to` / `recv_from` …).
         operation: &'static str,
@@ -267,7 +267,7 @@ pub enum Error {
     /// this machine, the correct handling is an error, and **not** falling back to sending it
     /// to everyone — that would put a payload meant for B into C's hands while the user sees
     /// nothing unusual.
-    #[error("这条定向消息没有可用的连接")]
+    #[error("this directed message has no usable connection")]
     NoConnectionToPeer,
 
     /// This frame is **not part of the same payload** as the frames received so far.
@@ -284,7 +284,7 @@ pub enum Error {
     /// QR code and is public.
     ///
     /// [`Error::VaultDecryptionFailed`]: https://docs.rs/qualia2fa-core
-    #[error("这一帧与之前收到的不是同一份载荷")]
+    #[error("this frame is not part of the same payload as the frames received so far")]
     FrameMismatch,
 
     /// A LAN transport layer (iroh/QUIC) operation failed.
@@ -293,7 +293,7 @@ pub enum Error {
     /// the QUIC data plane. Merging them would show "multicast blocked by a firewall" and
     /// "QUIC connection timed out" as one fault, although the two are handled completely
     /// differently.
-    #[error("局域网传输失败：{operation}")]
+    #[error("LAN transport failed: {operation}")]
     LanTransport {
         /// Which operation failed (`bind` / `connect` / `write` …).
         operation: &'static str,
@@ -314,6 +314,6 @@ pub enum Error {
     /// An interface that merges the two cases into one `Option` is the shortest path to a
     /// caller writing `let _ = receive(...)`, and that one line silently disables replay
     /// protection.
-    #[error("传输通道里暂时没有消息")]
+    #[error("the transport channel has no message at the moment")]
     TransportEmpty,
 }

@@ -620,7 +620,7 @@ mod tests {
         };
         listener
             .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("设置读超时");
+            .expect("must set the read timeout");
         let Ok(port) = listener.local_addr().map(|addr| addr.port()) else {
             return false;
         };
@@ -698,10 +698,14 @@ mod tests {
         };
         listener
             .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("设置读超时");
-        let port = listener.local_addr().expect("本地地址").port();
+            .expect("must set the read timeout");
+        let port = listener
+            .local_addr()
+            .expect("must have a local address")
+            .port();
 
-        let sender = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).expect("建发送方");
+        let sender = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+            .expect("must build the sender");
         if sender.set_multicast_if_v4(&Ipv4Addr::LOCALHOST).is_err() {
             return;
         }
@@ -716,11 +720,14 @@ mod tests {
         let target = SockAddr::from(SocketAddr::V4(SocketAddrV4::new(group, port)));
         sender
             .send_to(&announcement.encode(), &target)
-            .expect("发出组播");
+            .expect("must send the multicast");
 
         let mut buffer = [0_u8; 512];
-        let (length, _) = listener.recv_from(&mut buffer).expect("收到组播");
-        let decoded = Announcement::decode(&buffer[..length]).expect("自己发的必须解得开");
+        let (length, _) = listener
+            .recv_from(&mut buffer)
+            .expect("must receive the multicast");
+        let decoded =
+            Announcement::decode(&buffer[..length]).expect("a self-sent datagram must decode");
         assert_eq!(decoded, announcement);
     }
 
@@ -734,9 +741,12 @@ mod tests {
         match bind_multicast(config) {
             Ok(socket) => {
                 assert_eq!(
-                    socket.local_addr().expect("本地地址").port(),
+                    socket
+                        .local_addr()
+                        .expect("must have a local address")
+                        .port(),
                     config.port,
-                    "绑的是配置里的端口"
+                    "it binds the port from the configuration"
                 );
             }
             Err(Error::LanSocket { operation }) => {
@@ -745,10 +755,10 @@ mod tests {
                         operation,
                         "new" | "set_reuse_address" | "bind" | "join_multicast"
                     ),
-                    "失败只可能来自这几个系统调用，实际 {operation}"
+                    "only these system calls can fail, got {operation}"
                 );
             }
-            Err(other) => panic!("不该出现的错误：{other:?}"),
+            Err(other) => panic!("impossible error: {other:?}"),
         }
     }
 
@@ -775,14 +785,14 @@ mod tests {
         };
         external
             .set_read_timeout(Some(Duration::from_millis(400)))
-            .expect("设置读超时");
+            .expect("must set the read timeout");
 
         let Ok(lobby_socket) = bind_multicast(config) else {
             return;
         };
         lobby_socket
             .set_read_timeout(Some(Duration::from_millis(400)))
-            .expect("设置读超时");
+            .expect("must set the read timeout");
 
         let Ok(sender) = joined_socket(config.group, 0, Ipv4Addr::UNSPECIFIED) else {
             return;
@@ -834,7 +844,7 @@ mod tests {
         assert_eq!(
             bytes.len(),
             DATAGRAM_LEN,
-            "魔数 8 + 版本 1 + 种类 1 + 序号 8 + 标识 32 + 公钥 32 + 端口 2"
+            "magic 8 + version 1 + kind 1 + sequence 8 + device 32 + endpoint key 32 + port 2"
         );
         assert_eq!(&bytes[..8], b"Q2FALAN\0");
     }
@@ -873,7 +883,11 @@ mod tests {
         ) else {
             return;
         };
-        let port = lobby.socket.local_addr().expect("本地地址").port();
+        let port = lobby
+            .socket
+            .local_addr()
+            .expect("must have a local address")
+            .port();
 
         let peer = Announcement {
             kind: Kind::Hello,
@@ -882,17 +896,17 @@ mod tests {
             endpoint_key: endpoint(2),
             port: 41_011,
         };
-        let injector = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("绑注入方");
+        let injector = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("must bind the injector");
         injector
             .send_to(
                 &peer.encode(),
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
             )
-            .expect("注入公告");
+            .expect("must inject the announcement");
 
         let event = lobby
             .poll(Duration::from_secs(2))
-            .expect("应当收到一个事件");
+            .expect("must receive one event");
         assert_eq!(event.kind, EventKind::Appeared);
         assert_eq!(event.peer.device, peer.device);
         assert_eq!(event.peer.endpoint_key, peer.endpoint_key);
@@ -907,11 +921,11 @@ mod tests {
                 &peer.encode(),
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
             )
-            .expect("再注入一次");
+            .expect("must inject it again");
         assert_eq!(
             lobby.poll(Duration::from_millis(600)),
             None,
-            "序号没变的重发不该产生事件"
+            "a resend with an unchanged sequence must not produce an event"
         );
     }
 
@@ -932,20 +946,24 @@ mod tests {
         ) else {
             return;
         };
-        let port = lobby.socket.local_addr().expect("本地地址").port();
+        let port = lobby
+            .socket
+            .local_addr()
+            .expect("must have a local address")
+            .port();
         let target = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port));
-        let injector = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("绑注入方");
+        let injector = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("must bind the injector");
 
         for datagram in [
             b"GET / HTTP/1.1\r\n\r\n".as_slice(),
             b"Q2FALAN\0\x01\x01",
             b"Q2FASYN\0\x02\x01\x00",
         ] {
-            injector.send_to(datagram, target).expect("注入");
+            injector.send_to(datagram, target).expect("must inject");
         }
 
         assert_eq!(lobby.poll(Duration::from_millis(500)), None);
-        assert!(lobby.view().is_empty(), "坏报文不得进视图");
+        assert!(lobby.view().is_empty(), "a broken datagram must not enter the view");
     }
 
     /// **The periodic announce really reaches the group.**
@@ -968,7 +986,7 @@ mod tests {
         };
         listener
             .set_read_timeout(Some(Duration::from_secs(3)))
-            .expect("设置读超时");
+            .expect("must set the read timeout");
 
         let me = DeviceId::from_bytes([4; 32]);
         let Ok(lobby) = Lobby::open_with(me, endpoint(4), 41_013, config) else {
@@ -1009,7 +1027,7 @@ mod tests {
 
         lobby.shutdown();
         lobby.shutdown();
-        assert!(lobby.worker.is_none(), "线程句柄应当已经被取走");
+        assert!(lobby.worker.is_none(), "the thread handle must have been taken");
     }
 
     /// A device never turns itself into a peer.
@@ -1027,8 +1045,12 @@ mod tests {
             return;
         };
 
-        let port = lobby.socket.local_addr().expect("本地地址").port();
-        let injector = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("绑注入方");
+        let port = lobby
+            .socket
+            .local_addr()
+            .expect("must have a local address")
+            .port();
+        let injector = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("must bind the injector");
         let mine = Announcement {
             kind: Kind::Hello,
             sequence: 99,
@@ -1041,12 +1063,12 @@ mod tests {
                 &mine.encode(),
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
             )
-            .expect("注入自己的公告");
+            .expect("must inject its own announcement");
 
         assert_eq!(lobby.poll(Duration::from_millis(500)), None);
         assert!(
             lobby.view().get(&me).is_none(),
-            "自己不该出现在自己的对端列表里"
+            "a device must not appear in its own peer list"
         );
     }
 
@@ -1070,7 +1092,7 @@ mod tests {
         let payload_budget = MIN_IPV4_MTU - HEADERS;
         assert!(
             DATAGRAM_LEN * 2 <= payload_budget,
-            "{DATAGRAM_LEN} 字节的公告在 {payload_budget} 字节的预算里放不下两条"
+            "two {DATAGRAM_LEN}-byte announcements do not fit the {payload_budget}-byte budget"
         );
     }
 }
