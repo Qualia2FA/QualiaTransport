@@ -80,6 +80,24 @@ cargo +nightly fuzz run envelope_decode artifacts/envelope_decode/<crash-file>
 
 ## 写断言时的陷阱
 
+**`libfuzzer-sys` 的 panic hook 在展开之前就 `abort`。** 因此**库里的 `catch_unwind`
+在 fuzz 目标里形同虚设**：panic 还没开始展开，进程就被 hook 结束了。这个坑在给
+`qr_scan` 加收敛时才暴露出来（见 `Error::QrDecoderPanicked`）——库里的收敛是对的、
+`cargo test` 里的回归测试是绿的，而 fuzzer 仍然报同一份输入崩溃。目标要覆盖一条
+**已知会 panic** 的路径，就得先把这个 hook 换掉（`qr_scan.rs` 的 `loosen_panic_hook`）。
+代价是丢掉展开前的调用栈，而输入样本仍在，复现一次就有栈。
+
+**换掉 hook 也修不好 Windows。** Rust 的 panic 在 Windows 上以 SEH 异常的形式抛出，
+而 libFuzzer 自己有一个进程级的异常处理器，它会把这次抛出直接当成崩溃——`catch_unwind`
+一样没机会。因此**本机（Windows）跑 `qr_scan` 时，一个已经被库收敛的 panic 仍会报成
+崩溃**；CI 的 fuzz job 在 Linux 上，那里 panic 不发信号，收敛照常生效。要在本机确认
+收敛有效，看 `cargo test`，不要看这个目标。
+
+**一条已知的上游缺陷不该让关卡长期红着。** `rqrr` 0.11.0 里有一处断言会被退化图像
+触发（几十字节的周期性噪声就够），而本 crate 已经把它收敛成错误。若 fuzz 目标把这个
+错误重新抛成断言，这一关就会在上游修复之前一直红——而**长期红的关卡只会被无视**。
+因此 `qr_scan` 把它当成允许的结果：可见性由应用侧的日志与那条定长回归测试提供。
+
 **不要做全局子串搜索。** 断言「输出里含某个串」时，fuzzer 会构造出把该串放进**别的
 字段**的输入，于是断言命中了一个无关的位置——上游仓库已经因此误报过两次。判据是
 「断言有没有绑定到具体字段的结构」。

@@ -335,3 +335,59 @@ fn render_foreign(code: &qrcodegen::QrCode, scale: u32, quiet: u32) -> GrayImage
     }
     GrayImage::from_luma8(side, side, pixels).expect("尺寸自洽")
 }
+
+/// **回归**：这张图曾让图像解码器自己 panic，而它的输入是攻击者可控的。
+///
+/// # 输入是什么
+///
+/// 取自 fuzz 目标 `qr_scan` 的一次真实崩溃。54 字节、43×43 的**周期性噪声**：这样的
+/// 图会让解码器（`rqrr` 0.11.0）的透视变换算出极大值或 NaN，撞上它 `geometry.rs` 里
+/// 那句 `assert!(x <= i32::MAX as f64)`，于是线程 panic。在端侧那就是**用户导入一张
+/// 别人给的图片，应用整个死掉**。
+///
+/// # 为什么样本嵌在这里，而不是放进 `fuzz/regressions/`
+///
+/// 因为 fuzz 目标**看不到**这层收敛：`libfuzzer-sys` 的 panic hook 在展开前就 `abort`，
+/// 而 Windows 上 libFuzzer 的异常处理器还会把 Rust 的 SEH 抛出当成崩溃。样本进了语料库
+/// 就等于让本机的 `qr_scan` **每次开局都报一次崩溃**——一条永远红的关卡只会被无视，
+/// 而这条测试在任何平台上都跑得过。
+///
+/// # 这条测试盯的是什么
+///
+/// 「进程不会因为一张图死掉」，以及「解码器崩过这件事被如实报出来」——它**不**要求
+/// 这张图读得出码（它本来就没有码）。图中的构造方式与 fuzz 目标逐字节相同。
+///
+/// 若某天这条断言在升级 `rqrr` 之后失败，先去看那处 `assert!` 还在不在：不在了就把
+/// 断言放宽成「只要求返回错误」，并把本 crate 里那层收敛一起拿掉——那才是它退役的
+/// 正确时机。
+#[test]
+fn a_pathological_image_does_not_take_the_process_down() {
+    const FUZZ_INPUT: [u8; 54] = [
+        0x2a, 0x2a, 0x2a, 0x2a, 0x2a, 0x2a, 0xd8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x36, 0xff,
+        0x01, 0x06, 0xff, 0x2b, 0xeb, 0x00, 0x00, 0x00, 0xbb, 0x14, 0xa4, 0x78, 0x00, 0x00, 0x66,
+        0x33, 0x3b, 0x14, 0x00, 0x00, 0x3b, 0x14, 0x00, 0x00,
+    ];
+    // 与 `fuzz/fuzz_targets/qr_scan.rs` 逐字节相同的构造方式。
+    let width = 1 + u32::from(FUZZ_INPUT[0]) % 48;
+    let height = 1 + u32::from(FUZZ_INPUT[1]) % 48;
+    let needed = (width as usize) * (height as usize);
+    let pixels: Vec<u8> = FUZZ_INPUT[2..]
+        .iter()
+        .copied()
+        .cycle()
+        .take(needed)
+        .collect();
+    let image = GrayImage::from_luma8(width, height, pixels).expect("尺寸自洽");
+
+    for result in [
+        qr::scan::decode_text(&image).err(),
+        qr::scan::decode_payload(&image).err(),
+        qr::scan::decode_frame(&image).err(),
+    ] {
+        assert!(
+            matches!(result, Some(Error::QrDecoderPanicked)),
+            "解码器崩过必须被如实报出来，而不是混进「没找到码」或「不是我们的码」：{result:?}"
+        );
+    }
+}

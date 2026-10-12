@@ -16,5 +16,9 @@
 *.dll  binary
 *.lib  binary
 
+# fuzz 的回归样本：它们存在的理由是逐字节复现某个崩溃，因此**必须**按二进制存
+# （`* text=auto` 会在检出时改写行尾，而那样样本就不再是当初那一份了）。
+*.bin  binary
+
 # Rust 源码：diff 时按 Rust 语法高亮
 *.rs diff=rust

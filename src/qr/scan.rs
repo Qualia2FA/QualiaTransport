@@ -24,6 +24,20 @@
 //! # 输入是像素，不是文件
 //!
 //! 图像**格式**的解码归平台（见 [`crate::image`] 的说明），本模块只认灰度像素。
+//!
+//! # 解码器自己的 panic 也要收敛
+//!
+//! 「用户导入的图片」意味着这张图可能是**任何人**给的，而解码器（`rqrr` 0.11.0）的
+//! 透视变换里有一处 `assert!`：周期性噪声那类退化图像会让它算出极大值或 NaN，于是
+//! 线程 panic——fuzz 目标 `qr_scan` 在 2.7 万次执行内就找到了这样一张几十字节的图。
+//!
+//! 上游的断言我们改不了，但**本 crate 的契约是「任何输入都不得导致 panic」**，因此
+//! 调用解码器的每一处都过 `caught`（本模块的私有函数）：panic 被换成
+//! [`Error::QrDecoderPanicked`]，端侧看到的是「这张图读不出来」，而不是应用整个死掉。
+//! 这是收敛，不是修复。
+//!
+//! 代价有两条，都写在这里：它依赖 panic 展开（`panic = "abort"` 的构建里这层失效），
+//! 以及每一次调用多一层 `catch_unwind`（代价在微秒级，而一次图像解码是毫秒级）。
 
 use crate::envelope;
 use crate::error::{Error, Result};
@@ -142,17 +156,25 @@ struct ScanReport {
     saw_binary: bool,
     /// 解出了文本。
     saw_text: bool,
+    /// 图像解码器**自己崩了**，被 [`caught`] 拦下。
+    ///
+    /// 它是一条真实发生过的异常，而不是「没找到码」：混进 [`Error::NoQrFound`] 会让
+    /// 上游的缺陷在整个日志里消失。见 [`Error::QrDecoderPanicked`]。
+    decoder_panicked: bool,
 }
 
 impl ScanReport {
     /// 按信息量从高到低挑一个错误。
     ///
     /// 顺序不是随手排的：**读出了文本**说明图里确实有码，只是不是我们的（对用户来说
-    /// 意味着「你扫错码了」）；**读出了字节但不是文本**说明那张码不是给文本用的；
-    /// 只有格子上报的错误才说明「码在那儿但读不出来」；三者都没有才是「图里没有码」。
+    /// 意味着「你扫错码了」）；**解码器崩过**说明这张图连扫都没扫完，那比「没找到码」
+    /// 更值得记一笔；**读出了字节但不是文本**说明那张码不是给文本用的；只有格子上报的
+    /// 错误才说明「码在那儿但读不出来」；三者都没有才是「图里没有码」。
     fn into_error(self) -> Error {
         if self.saw_text {
             Error::NotOurQrText
+        } else if self.decoder_panicked {
+            Error::QrDecoderPanicked
         } else if self.saw_binary {
             Error::QrNotText
         } else if let Some(error) = self.grid_error {
@@ -161,6 +183,27 @@ impl ScanReport {
             Error::NoQrFound
         }
     }
+}
+
+/// 把一次**可能 panic** 的解码器调用包起来。
+///
+/// # 为什么一个 `catch_unwind` 会出现在这里
+///
+/// `rqrr` 0.11.0 的透视变换里有一处 `assert!`，退化图像（周期性噪声是最容易复现的
+/// 一种）会让它算出极大值或 NaN 而失败。触发它只需要几十字节的输入，而这条路径的
+/// 输入是**攻击者可控**的——「从图片导入」意味着用户会把别人给的图交进来。
+///
+/// 本 crate 的契约是「任何输入都不得导致 panic」，而我们不能修上游的断言，因此把
+/// 调用它的那几处各自收敛一层：**返回 `None` 表示「解码器崩了」**，由调用方记成
+/// [`Error::QrDecoderPanicked`]。
+///
+/// 收敛的粒度是**单次调用**而不是「整个扫描」：调用方自己的回调不在里面，因此本
+/// crate 代码里的 panic 不会被这里悄悄吞掉。
+fn caught<T>(f: impl FnOnce() -> T) -> Option<T> {
+    // `AssertUnwindSafe`：闭包只借用像素与解码器状态，而 panic 之后我们立刻丢掉这次
+    // 调用的全部中间结果（下面每一处都直接返回或换成错误），不存在「看到半更新的
+    // 状态」这回事。
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
 }
 
 /// 逐个格子尝试解码，把每个**成功解出的字节流**交给回调。
@@ -180,15 +223,31 @@ where
     if image.width() < MIN_IMAGE_SIDE || image.height() < MIN_IMAGE_SIDE {
         return report;
     }
-    let mut prepared = PreparedImage::prepare_from_greyscale(
-        image.width() as usize,
-        image.height() as usize,
-        |x, y| image.at(x, y),
-    );
-    for grid in prepared.detect_grids() {
-        let mut raw = Vec::new();
-        match grid.decode_to(&mut raw) {
-            Ok(_metadata) => {
+    // ① 建索引。它自己也可能 panic（`prepare_from_greyscale` 里有 `expect`）。
+    let Some(mut prepared) = caught(|| {
+        PreparedImage::prepare_from_greyscale(
+            image.width() as usize,
+            image.height() as usize,
+            |x, y| image.at(x, y),
+        )
+    }) else {
+        report.decoder_panicked = true;
+        return report;
+    };
+    // ② 定位。fuzz 抓到的那处断言就在这一步里（`Perspective::map`）。
+    let Some(grids) = caught(|| prepared.detect_grids()) else {
+        report.decoder_panicked = true;
+        return report;
+    };
+
+    for grid in grids {
+        // ③ 解一个格子。崩在这里不影响其它格子——继续看下一个。
+        let decoded = caught(|| {
+            let mut raw = Vec::new();
+            grid.decode_to(&mut raw).map(|metadata| (raw, metadata))
+        });
+        match decoded {
+            Some(Ok((raw, _metadata))) => {
                 if core::str::from_utf8(&raw).is_ok() {
                     report.saw_text = true;
                 } else {
@@ -198,11 +257,12 @@ where
                     return report;
                 }
             }
-            Err(error) => {
+            Some(Err(error)) => {
                 if report.grid_error.is_none() {
                     report.grid_error = Some(Error::QrDecode(error));
                 }
             }
+            None => report.decoder_panicked = true,
         }
     }
     report
