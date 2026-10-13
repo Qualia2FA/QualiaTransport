@@ -221,7 +221,8 @@ fn caught<T>(f: impl FnOnce() -> T) -> Option<T> {
 ///
 /// 1. the image as handed over;
 /// 2. the image at half its size, which is also what taking the interference out looks like;
-/// 3. the image inverted, because a code drawn light on dark holds the same data as one drawn
+/// 3. the image darkened, which puts back the thickness a soft picture takes off the modules;
+/// 4. the image inverted, because a code drawn light on dark holds the same data as one drawn
 ///    the usual way round and the decoder accepts the usual one only.
 ///
 /// When none of them is accepted, the first pass's report is returned: it describes the image
@@ -240,6 +241,12 @@ where
             return half_report;
         }
     }
+    if let Some(dark) = darkened(image) {
+        let dark_report = scan(&dark, &mut on_raw);
+        if dark_report.accepted {
+            return dark_report;
+        }
+    }
     let Some(flipped) = inverted(image) else {
         return report;
     };
@@ -249,6 +256,38 @@ where
     } else {
         report
     }
+}
+
+/// The same image with every pixel replaced by the darkest value in its 3×3 neighbourhood.
+///
+/// A picture that is out of focus — a photograph of a screen, a code read from across a room —
+/// bleeds light into the dark modules, and a threshold in the middle of the range then cuts
+/// them thinner than they were drawn: the finder patterns stop measuring 1:1:3:1:1 and no grid
+/// is found at all, however clearly the code can be seen. Taking the darkest value in each
+/// neighbourhood puts that thickness back, and it is the difference between "no code here" and
+/// a code, for a picture where every module is present and merely soft.
+fn darkened(image: &GrayImage) -> Option<GrayImage> {
+    let width = image.width() as usize;
+    let height = image.height() as usize;
+    let source = image.pixels();
+    let mut pixels = vec![0u8; source.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let mut darkest = 255u8;
+            for dy in -1i64..=1 {
+                let ny = (y as i64 + dy).clamp(0, height as i64 - 1) as usize;
+                for dx in -1i64..=1 {
+                    let nx = (x as i64 + dx).clamp(0, width as i64 - 1) as usize;
+                    let value = source[ny * width + nx];
+                    if value < darkest {
+                        darkest = value;
+                    }
+                }
+            }
+            pixels[y * width + x] = darkest;
+        }
+    }
+    GrayImage::from_luma8(image.width(), image.height(), pixels).ok()
 }
 
 /// The same image with every 2×2 block averaged into one pixel.

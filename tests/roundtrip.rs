@@ -70,6 +70,53 @@ fn round_trip(profile: &QrProfile, len: usize) {
     );
 }
 
+/// A blurred code reads back.
+///
+/// Softness bleeds light into the dark modules, and a threshold in the middle of the range then
+/// cuts them thinner than they were drawn, until the finder patterns no longer measure
+/// 1:1:3:1:1 and no grid is found — for a picture in which every module is present. The reader
+/// darkens the picture among its later attempts, which is what puts the thickness back.
+#[test]
+fn a_blurred_code_is_still_read() {
+    let profile = QrProfile::new(EcLevel::Medium, 10).expect("the profile is legal");
+    let payload = pseudo_random(20);
+    let symbol = profile.encode_payload(&payload).expect("20 bytes must fit");
+    let image = symbol.render(8, 4).expect("the render geometry is legal");
+
+    for radius in 1..=3usize {
+        let blurred = blur(&image, radius);
+        assert_eq!(
+            qr::scan::decode_payload(&blurred)
+                .unwrap_or_else(|error| panic!("a code blurred by {radius} must read: {error}")),
+            payload
+        );
+    }
+}
+
+/// Every pixel replaced by the average of its `(2 * radius + 1)²` neighbourhood.
+fn blur(image: &GrayImage, radius: usize) -> GrayImage {
+    let width = image.width() as usize;
+    let height = image.height() as usize;
+    let source = image.pixels();
+    let mut pixels = vec![0u8; source.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let mut total = 0u32;
+            let mut count = 0u32;
+            for dy in -(radius as i64)..=(radius as i64) {
+                let ny = (y as i64 + dy).clamp(0, height as i64 - 1) as usize;
+                for dx in -(radius as i64)..=(radius as i64) {
+                    let nx = (x as i64 + dx).clamp(0, width as i64 - 1) as usize;
+                    total += u32::from(source[ny * width + nx]);
+                    count += 1;
+                }
+            }
+            pixels[y * width + x] = (total / count) as u8;
+        }
+    }
+    GrayImage::from_luma8(image.width(), image.height(), pixels).expect("the size is consistent")
+}
+
 /// A code photographed off a screen reads back with the screen's own pixel grid on top of it.
 ///
 /// A photograph of a screen carries an interference pattern that says nothing about the code,
