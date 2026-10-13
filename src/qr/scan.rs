@@ -208,17 +208,24 @@ fn caught<T>(f: impl FnOnce() -> T) -> Option<T> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
 }
 
-/// Scans `image`, and scans it inverted when the first pass accepted nothing.
+/// Scans `image` as it is, and goes on to the variants below while nothing is accepted.
 ///
-/// A code drawn light on dark holds exactly the same data as one drawn the usual way round;
-/// only the convention differs, and the tool that drew it — or the theme it was drawn for —
-/// is free to pick either. The decoder accepts the usual one only, so reading the other means
-/// asking it about the inverted image.
+/// A photograph of a screen carries the screen's own pixel grid on top of the code, and the
+/// decoder resamples the modules out of the picture on its own. Whether that resampling lands
+/// on the modules or between them depends on the scale the picture happens to have: a code that
+/// is unreadable at one resolution is often readable at half of it, where averaging four pixels
+/// into one takes the interference out. Which resolution that is cannot be known in advance,
+/// so the cheap thing to do is try.
 ///
-/// The second pass runs only after a first pass that accepted nothing, so an image with a
-/// readable code on it pays one detection, and the retry costs nothing on the ordinary path.
-/// When neither way round is accepted, the first pass's report is returned: it describes the
-/// image the caller actually handed over, which is what its error message should be about.
+/// The variants, in order, each running only while nothing has been accepted:
+///
+/// 1. the image as handed over;
+/// 2. the image at half its size, which is also what taking the interference out looks like;
+/// 3. the image inverted, because a code drawn light on dark holds the same data as one drawn
+///    the usual way round and the decoder accepts the usual one only.
+///
+/// When none of them is accepted, the first pass's report is returned: it describes the image
+/// the caller actually handed over, which is what its error message should be about.
 fn scan_either_way<F>(image: &GrayImage, mut on_raw: F) -> ScanReport
 where
     F: FnMut(&[u8]) -> bool,
@@ -226,6 +233,12 @@ where
     let report = scan(image, &mut on_raw);
     if report.accepted {
         return report;
+    }
+    if let Some(half) = halved(image) {
+        let half_report = scan(&half, &mut on_raw);
+        if half_report.accepted {
+            return half_report;
+        }
     }
     let Some(flipped) = inverted(image) else {
         return report;
@@ -236,6 +249,33 @@ where
     } else {
         report
     }
+}
+
+/// The same image with every 2×2 block averaged into one pixel.
+///
+/// Returns `None` for an image too small to halve, which leaves the callers with the report
+/// they already have rather than an error of their own.
+fn halved(image: &GrayImage) -> Option<GrayImage> {
+    let width = image.width() / 2;
+    let height = image.height() / 2;
+    if width < MIN_IMAGE_SIDE || height < MIN_IMAGE_SIDE {
+        return None;
+    }
+    let source = image.pixels();
+    let mut pixels = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let left = 2 * x;
+            let top = 2 * y;
+            let stride = image.width() as usize;
+            let total = source[top as usize * stride + left as usize] as u32
+                + source[top as usize * stride + left as usize + 1] as u32
+                + source[(top as usize + 1) * stride + left as usize] as u32
+                + source[(top as usize + 1) * stride + left as usize + 1] as u32;
+            pixels.push((total / 4) as u8);
+        }
+    }
+    GrayImage::from_luma8(width, height, pixels).ok()
 }
 
 /// The same image with light and dark exchanged.

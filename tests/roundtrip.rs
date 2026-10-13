@@ -70,6 +70,45 @@ fn round_trip(profile: &QrProfile, len: usize) {
     );
 }
 
+/// A code photographed off a screen reads back with the screen's own pixel grid on top of it.
+///
+/// A photograph of a screen carries an interference pattern that says nothing about the code,
+/// and whether the decoder's own resampling lands on the modules or between them depends on the
+/// resolution the picture happens to have. The pattern here is deliberately coarse enough to
+/// matter at the picture's own size and to average away when four pixels become one.
+#[test]
+fn a_code_under_screen_interference_is_still_read() {
+    let profile = QrProfile::new(EcLevel::Medium, 10).expect("the profile is legal");
+    let payload = pseudo_random(20);
+    let symbol = profile.encode_payload(&payload).expect("20 bytes must fit");
+    let image = symbol.render(8, 4).expect("the render geometry is legal");
+
+    let width = image.width() as usize;
+    let noisy = GrayImage::from_luma8(
+        image.width(),
+        image.height(),
+        image
+            .pixels()
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let shift = if (index % width + index / width).is_multiple_of(2) {
+                    40
+                } else {
+                    -40
+                };
+                ((*value as i16) + shift).clamp(0, 255) as u8
+            })
+            .collect(),
+    )
+    .expect("the size is consistent");
+
+    assert_eq!(
+        qr::scan::decode_payload(&noisy).expect("a code under interference"),
+        payload
+    );
+}
+
 /// A code drawn light on dark reads back too.
 ///
 /// Both ways round carry the same data, and a design tool or a dark theme is free to pick
