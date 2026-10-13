@@ -66,7 +66,7 @@ const MIN_IMAGE_SIDE: u32 = 21;
 /// - [`Error::QrDecode`]: a code was found but failed checksum or error correction.
 pub fn decode_text(image: &GrayImage) -> Result<String> {
     let mut found: Option<String> = None;
-    let report = scan(image, |raw| {
+    let report = scan_either_way(image, |raw| {
         if let Ok(text) = core::str::from_utf8(raw) {
             found = Some(text.to_owned());
             true
@@ -125,7 +125,7 @@ where
 {
     let mut found: Option<T> = None;
     let mut specific: Option<Error> = None;
-    let report = scan(image, |raw| {
+    let report = scan_either_way(image, |raw| {
         let Ok(text) = core::str::from_utf8(raw) else {
             return false;
         };
@@ -157,6 +157,8 @@ struct ScanReport {
     saw_binary: bool,
     /// Text was decoded.
     saw_text: bool,
+    /// The callback took something, so the scan stopped early and found what it wanted.
+    accepted: bool,
     /// The decoder itself panicked and `caught` stopped it.
     ///
     /// This is a real anomaly rather than "no code found": folding it into
@@ -204,6 +206,45 @@ impl ScanReport {
 /// is not swallowed by accident.
 fn caught<T>(f: impl FnOnce() -> T) -> Option<T> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
+}
+
+/// Scans `image`, and scans it inverted when the first pass accepted nothing.
+///
+/// A code drawn light on dark holds exactly the same data as one drawn the usual way round;
+/// only the convention differs, and the tool that drew it — or the theme it was drawn for —
+/// is free to pick either. The decoder accepts the usual one only, so reading the other means
+/// asking it about the inverted image.
+///
+/// The second pass runs only after a first pass that accepted nothing, so an image with a
+/// readable code on it pays one detection, and the retry costs nothing on the ordinary path.
+/// When neither way round is accepted, the first pass's report is returned: it describes the
+/// image the caller actually handed over, which is what its error message should be about.
+fn scan_either_way<F>(image: &GrayImage, mut on_raw: F) -> ScanReport
+where
+    F: FnMut(&[u8]) -> bool,
+{
+    let report = scan(image, &mut on_raw);
+    if report.accepted {
+        return report;
+    }
+    let Some(flipped) = inverted(image) else {
+        return report;
+    };
+    let flipped_report = scan(&flipped, &mut on_raw);
+    if flipped_report.accepted {
+        flipped_report
+    } else {
+        report
+    }
+}
+
+/// The same image with light and dark exchanged.
+///
+/// Returns `None` when the copy cannot be built (the size limits of [`GrayImage`]), which
+/// leaves the caller with the report it already has rather than an error of its own.
+fn inverted(image: &GrayImage) -> Option<GrayImage> {
+    let pixels = image.pixels().iter().map(|value| !value).collect();
+    GrayImage::from_luma8(image.width(), image.height(), pixels).ok()
 }
 
 /// Tries to decode every grid, handing each **successfully decoded byte stream**
@@ -254,6 +295,7 @@ where
                     report.saw_binary = true;
                 }
                 if on_raw(&raw) {
+                    report.accepted = true;
                     return report;
                 }
             }

@@ -70,6 +70,31 @@ fn round_trip(profile: &QrProfile, len: usize) {
     );
 }
 
+/// A code drawn light on dark reads back too.
+///
+/// Both ways round carry the same data, and a design tool or a dark theme is free to pick
+/// either; the decoder is asked about the inverted image when the code as handed over holds
+/// nothing it will accept.
+#[test]
+fn an_inverted_code_is_still_read() {
+    let profile = QrProfile::new(EcLevel::Medium, 10).expect("the profile is legal");
+    let payload = pseudo_random(20);
+    let symbol = profile.encode_payload(&payload).expect("20 bytes must fit");
+    let image = symbol.render(4, 4).expect("the render geometry is legal");
+
+    let flipped = GrayImage::from_luma8(
+        image.width(),
+        image.height(),
+        image.pixels().iter().map(|value| !value).collect(),
+    )
+    .expect("the size is consistent");
+
+    assert_eq!(
+        qr::scan::decode_payload(&flipped).expect("a code read the other way round"),
+        payload
+    );
+}
+
 /// Four error-correction levels × versions from the smallest to the largest: **each** one must
 /// render and read back.
 ///
