@@ -372,16 +372,17 @@ impl Lobby {
 
     /// Records an event in this side's view.
     ///
-    /// Both views are written through the same `observe` path, so replaying an
-    /// event here is what keeps the worker's view and this one consistent, and the
-    /// sequence rule makes applying the same event twice idempotent.
+    /// Both views are written through the same path, so replaying an event here is what keeps
+    /// the worker's view and this one consistent, and the sequence rule makes applying the same
+    /// event twice idempotent. The address travels with the event as well: a peer this side's
+    /// view can show must be one it can also dial.
     fn apply(&mut self, timed: TimedEvent) -> Event {
         let kind = match timed.event.kind {
             EventKind::Appeared => Kind::Hello,
             EventKind::SaidGoodbye | EventKind::Expired => Kind::Bye,
         };
         let peer = timed.event.peer;
-        self.view.observe(
+        self.view.observe_from(
             Announcement {
                 kind,
                 sequence: peer.sequence,
@@ -389,6 +390,7 @@ impl Lobby {
                 endpoint_key: peer.endpoint_key,
                 port: peer.port,
             },
+            peer.source,
             timed.at_ms,
         );
         timed.event
@@ -458,7 +460,7 @@ fn serve(
         let _ = socket.set_read_timeout(Some(Duration::from_millis(slice)));
 
         match socket.recv_from(&mut buffer) {
-            Ok((length, _from)) => {
+            Ok((length, from)) => {
                 let Some(datagram) = buffer.get(..length) else {
                     continue;
                 };
@@ -469,7 +471,7 @@ fn serve(
                     continue;
                 }
                 let at_ms = started.elapsed().as_millis() as u64;
-                let changed = view.observe(announcement, at_ms);
+                let changed = view.observe_from(announcement, Some(from), at_ms);
                 if changed && let Some(peer) = view.get(&announcement.device) {
                     let kind = match announcement.kind {
                         Kind::Hello => EventKind::Appeared,
@@ -912,6 +914,11 @@ mod tests {
         assert_eq!(event.peer.endpoint_key, peer.endpoint_key);
         assert_eq!(event.peer.port, peer.port);
         assert_eq!(event.peer.status, PeerStatus::Here);
+        assert_eq!(
+            event.peer.source,
+            injector.local_addr().ok(),
+            "the address a peer is dialed at is the one its datagram came from"
+        );
 
         assert_eq!(lobby.view().here().len(), 1);
         assert_eq!(lobby.view().get(&peer.device), Some(event.peer));

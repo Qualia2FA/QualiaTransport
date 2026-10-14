@@ -60,6 +60,8 @@
 //! cannot produce the endpoint private key. **Discovery may be unauthenticated; credentials
 //! must come from the channel.**
 
+use std::net::SocketAddr;
+
 use qualia_dik::{DEVICE_ID_LEN, DeviceId};
 
 use crate::error::{Error, Result};
@@ -290,6 +292,12 @@ pub struct Peer {
     pub endpoint_key: EndpointKey,
     /// Port.
     pub port: u16,
+    /// The address the last announcement arrived from, when the caller read one off a socket.
+    ///
+    /// **This is what makes a discovered peer dialable.** An announcement carries no address of
+    /// its own, so the only honest source for one is the datagram: whoever sent it. `None` means
+    /// the caller supplied none — pure-logic use, or a caller that only displays the peer.
+    pub source: Option<SocketAddr>,
     /// The status heard last.
     pub status: PeerStatus,
     /// When this peer was last heard from, in caller-supplied milliseconds.
@@ -351,7 +359,29 @@ impl LanView {
     /// `false` means the sequence number is not newer than the known one (reordering or
     /// duplicate delivery), or the same [`Kind::Bye`] arrived twice. It does **not** mean
     /// the datagram was malformed: that is reported by [`Announcement::decode`].
+    ///
+    /// The address a peer can be reached at is not known here: see
+    /// [`LanView::observe_from`].
     pub fn observe(&mut self, announcement: Announcement, now_ms: u64) -> bool {
+        self.observe_from(announcement, None, now_ms)
+    }
+
+    /// Takes one announcement together with the address it arrived from.
+    ///
+    /// The source is a parameter rather than a field of [`Announcement`]: it is a property of
+    /// the datagram, not of what the sender wrote. A device that announces from two interfaces
+    /// would otherwise have to choose one to write down, and the receiver would be dialing an
+    /// address the sender never used. [`crate::lan::lobby`] fills the parameter in from the
+    /// socket it read the datagram off.
+    ///
+    /// `None` leaves an address already known alone rather than erasing it: a caller that reads
+    /// datagrams without a source must not make a peer that was reachable unreachable.
+    pub fn observe_from(
+        &mut self,
+        announcement: Announcement,
+        source: Option<SocketAddr>,
+        now_ms: u64,
+    ) -> bool {
         let device = announcement.device;
 
         if let Some(previous) = self.peers.iter_mut().find(|peer| peer.device == device) {
@@ -360,6 +390,9 @@ impl LanView {
             }
             previous.endpoint_key = announcement.endpoint_key;
             previous.port = announcement.port;
+            if let Some(source) = source {
+                previous.source = Some(source);
+            }
             previous.status = match announcement.kind {
                 Kind::Hello => PeerStatus::Here,
                 Kind::Bye => PeerStatus::Left,
@@ -377,6 +410,7 @@ impl LanView {
             device,
             endpoint_key: announcement.endpoint_key,
             port: announcement.port,
+            source,
             status: match announcement.kind {
                 Kind::Hello => PeerStatus::Here,
                 Kind::Bye => PeerStatus::Left,
@@ -700,6 +734,42 @@ mod tests {
                 .expect("must be in the view")
                 .last_seen_ms,
             2_000
+        );
+    }
+
+    /// The address a peer can be dialed at comes from the datagram it announced in.
+    ///
+    /// An announcement carries no address of its own, so this is the only honest source for
+    /// one, and the reason the view stores it per peer: a device that moved is dialed where it
+    /// now is, and a caller that reads datagrams without a source does not erase what it knew.
+    #[test]
+    fn a_peer_keeps_the_address_its_announcement_came_from() {
+        let mut view = LanView::new();
+        let (id, _) = device(7);
+        let first = SocketAddr::from(([192, 168, 1, 7], 41_001));
+        let moved = SocketAddr::from(([10, 0, 0, 7], 41_002));
+
+        assert!(view.observe_from(hello(7, 0), Some(first), 1_000));
+        assert_eq!(
+            view.get(&id).expect("must be in the view").source,
+            Some(first)
+        );
+
+        assert!(
+            view.observe(hello(7, 1), 2_000),
+            "a newer announcement is news even when the caller has no source for it"
+        );
+        assert_eq!(
+            view.get(&id).expect("must be in the view").source,
+            Some(first),
+            "a caller that supplies no source must not make a reachable peer unreachable"
+        );
+
+        assert!(view.observe_from(hello(7, 2), Some(moved), 3_000));
+        assert_eq!(
+            view.get(&id).expect("must be in the view").source,
+            Some(moved),
+            "a peer that moved must be dialed at the address it now announces from"
         );
     }
 

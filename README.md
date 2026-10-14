@@ -42,7 +42,8 @@ let mut lobby = Lobby::open(my_device_id, my_endpoint_key, my_port)?;
 
 // 界面每次刷新时把积压的事件取完。
 while let Some(event) = lobby.try_poll() {
-    println!("{:?} 现在 {:?}", event.peer.device, event.peer.status);
+    // 每条目带着它公告的**来源地址**：拿到就能直接拨过去，不必再问一次「你在哪」。
+    println!("{:?} 现在 {:?}，地址 {:?}", event.peer.device, event.peer.status, event.peer.source);
 }
 
 // 跨网段（组播到不了）时，把连接信息放进二维码带外传过去。

@@ -46,7 +46,9 @@ let mut lobby = Lobby::open(my_device_id, my_endpoint_key, my_port)?;
 
 // The UI drains the queued events on every refresh.
 while let Some(event) = lobby.try_poll() {
-    println!("{:?} is now {:?}", event.peer.device, event.peer.status);
+    // Each entry carries the address its announcement came from, so a peer that was
+    // discovered can be dialed without asking again where it is.
+    println!("{:?} is now {:?} at {:?}", event.peer.device, event.peer.status, event.peer.source);
 }
 
 // Across segments, where multicast does not reach, carry the connection info in a QR code
