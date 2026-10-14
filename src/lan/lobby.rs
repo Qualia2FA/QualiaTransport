@@ -54,10 +54,12 @@
 //!
 //! - **Android 17 (targetSdk 37+)** needs `ACCESS_LOCAL_NETWORK` to send and
 //!   receive multicast on the local network; the platform layer requests it.
-//! - **Multiple interfaces**: which interface multicast leaves by is decided by
-//!   the routing table. `set_multicast_if_v4` could pin one, but this crate
-//!   deliberately leaves that to the routing table instead of enumerating
-//!   interfaces and guessing which one the user meant.
+//! - **Multiple interfaces**: every candidate of [`candidate_interfaces`] gets its own socket,
+//!   all of them join the group and announcements leave by all of them. Discovery is scoped to a
+//!   segment, so a host that follows a single route can end up joined where no other device
+//!   announces: it hears nobody, and nothing reports a failure. A caller that knows better
+//!   sets [`LanConfig::interface`] to pin one interface instead of taking every candidate.
+
 //! - **Windows** delivers an incoming multicast datagram only to the last socket
 //!   that bound the group and port, so two [`Lobby`] instances on one machine do
 //!   not hear each other there. That is IP multicast semantics, not a defect.
@@ -123,6 +125,13 @@ pub struct LanConfig {
     pub port: u16,
     /// Announce interval in milliseconds.
     pub announce_interval_ms: u64,
+    /// One local interface to use, or `None` for every candidate.
+    ///
+    /// `None` is what a caller wants: discovery is per broadcast domain, so every candidate of
+    /// [`candidate_interfaces`] gets its own socket, all of them join the group, and
+    /// announcements leave by all of them. `Some` pins one address for a caller that knows
+    /// better — a user picking an interface in a settings screen, or a test.
+    pub interface: Option<Ipv4Addr>,
 }
 
 impl Default for LanConfig {
@@ -131,6 +140,7 @@ impl Default for LanConfig {
             group: GROUP,
             port: PORT,
             announce_interval_ms: ANNOUNCE_INTERVAL_MS,
+            interface: None,
         }
     }
 }
@@ -141,6 +151,56 @@ impl LanConfig {
     pub const fn group_addr(&self) -> SocketAddrV4 {
         SocketAddrV4::new(self.group, self.port)
     }
+}
+
+/// Every local address an announcement is sent from, and the group is joined on.
+///
+/// # Discovery is scoped to a segment, not to a route
+///
+/// A route answers "where does a datagram to that address leave"; discovery asks "who is on my
+/// segment", and a segment is a property of an interface. A host with virtual adapters — a VPN
+/// tunnel, a hypervisor bridge, a container network — gets a route that leads into one of them,
+/// and a lobby that follows it joins the group where no other device announces: it hears
+/// nobody, and nothing reports a failure. Measured on a Windows host whose operating system
+/// joined the group on a VPN adapter while the device it was looking for was on WiFi, one
+/// interface away.
+///
+/// Every candidate therefore gets its own socket. All of them join the group, announcements
+/// leave by all of them, and whichever segment a peer is on is a segment that is covered.
+/// Interfaces that lead nowhere cost one datagram each and stay silent, which is why nothing
+/// is guessed and nothing is excluded by name: a bridge into a real segment **is** a real
+/// segment.
+///
+/// A candidate is an IPv4 address that is neither loopback, nor link-local, nor the wildcard,
+/// and whose netmask is wider than a single host.
+#[must_use]
+pub fn candidate_interfaces() -> Vec<Ipv4Addr> {
+    let mut addresses: Vec<Ipv4Addr> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|interface| match interface.addr {
+            if_addrs::IfAddr::V4(address) => Some(address),
+            if_addrs::IfAddr::V6(_) => None,
+        })
+        .filter(|address| {
+            let ip = address.ip;
+            !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified()
+        })
+        .filter(|address| {
+            address
+                .netmask
+                .octets()
+                .iter()
+                .map(|octet| octet.count_ones())
+                .sum::<u32>()
+                < 31
+        })
+        .map(|address| address.ip)
+        .collect();
+
+    addresses.sort_unstable();
+    addresses.dedup();
+    addresses
 }
 
 /// Something that happened in the lobby.
@@ -231,8 +291,12 @@ impl SelfAnnouncement {
 pub struct Lobby {
     /// The values this device announces about itself.
     me: SelfAnnouncement,
-    /// Socket shared by sending and receiving.
-    socket: Arc<UdpSocket>,
+    /// One socket per candidate interface, shared by sending and receiving.
+    ///
+    /// Several rather than one: an announcement has to leave by the interface whose segment
+    /// the peer is on, and that cannot be known before the peer answers (see
+    /// [`candidate_interfaces`]).
+    sockets: Arc<Vec<Arc<UdpSocket>>>,
     /// Configuration.
     config: LanConfig,
     /// Peers currently seen (the `Lobby`-side copy).
@@ -286,27 +350,35 @@ impl Lobby {
             endpoint_key,
             port,
         };
-        let socket = Arc::new(bind_multicast(config)?);
+        let sockets = Arc::new(bind_multicast(config)?);
         let (sender, events) = mpsc::channel();
         let running = Arc::new(AtomicBool::new(true));
         let sequence = Arc::new(AtomicU64::new(0));
 
         let worker = {
-            let socket = Arc::clone(&socket);
+            let sockets = Arc::clone(&sockets);
             let running = Arc::clone(&running);
             let sequence = Arc::clone(&sequence);
             thread::Builder::new()
                 .name("qualia-lan-lobby".into())
                 .spawn(move || {
                     let mut view = LanView::new();
-                    serve(&socket, config, me, &mut view, &sender, &running, &sequence);
+                    serve(
+                        sockets.as_slice(),
+                        config,
+                        me,
+                        &mut view,
+                        &sender,
+                        &running,
+                        &sequence,
+                    );
                 })
                 .map_err(|_| Error::LanSocket { operation: "spawn" })?
         };
 
         Ok(Self {
             me,
-            socket,
+            sockets,
             config,
             view: LanView::new(),
             events,
@@ -355,7 +427,7 @@ impl Lobby {
     pub fn announce_now(&self) -> Result<()> {
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
         let announcement = self.me.announcement(Kind::Hello, sequence);
-        send_datagram(&self.socket, self.config, &announcement)
+        send_datagram(&self.sockets, self.config, &announcement)
     }
 
     /// Closes the lobby: sends a `Bye` for every peer still here, then stops the
@@ -401,7 +473,7 @@ impl Lobby {
         for peer in self.view.here() {
             let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
             let announcement = self.me.announcement(Kind::Bye, sequence);
-            let _ = send_datagram(&self.socket, self.config, &announcement);
+            let _ = send_datagram(&self.sockets, self.config, &announcement);
             let _ = peer;
         }
     }
@@ -425,7 +497,7 @@ impl Drop for Lobby {
 /// `running` becoming `false` ends it. A failed `events.send` means the receiver is
 /// gone (the `Lobby` is being dropped) and is ignored as well.
 fn serve(
-    socket: &Arc<UdpSocket>,
+    sockets: &[Arc<UdpSocket>],
     config: LanConfig,
     me: SelfAnnouncement,
     view: &mut LanView,
@@ -445,7 +517,7 @@ fn serve(
         };
         if due {
             let sequence = sequence.fetch_add(1, Ordering::Relaxed);
-            let _ = send_datagram(socket, config, &me.announcement(Kind::Hello, sequence));
+            let _ = send_datagram(sockets, config, &me.announcement(Kind::Hello, sequence));
             last_announce = Some(Instant::now());
         }
 
@@ -457,34 +529,35 @@ fn serve(
                 .clamp(1, LOOP_SLICE_MS),
             None => LOOP_SLICE_MS,
         };
-        let _ = socket.set_read_timeout(Some(Duration::from_millis(slice)));
+        let per_socket = (slice / sockets.len().max(1) as u64).max(1);
 
-        match socket.recv_from(&mut buffer) {
-            Ok((length, from)) => {
-                let Some(datagram) = buffer.get(..length) else {
-                    continue;
-                };
-                let Ok(announcement) = Announcement::decode(datagram) else {
-                    continue;
-                };
-                if announcement.device == me.device {
-                    continue;
+        for socket in sockets {
+            let _ = socket.set_read_timeout(Some(Duration::from_millis(per_socket)));
+
+            match socket.recv_from(&mut buffer) {
+                Ok((length, from)) => {
+                    if let Some(datagram) = buffer.get(..length)
+                        && let Ok(announcement) = Announcement::decode(datagram)
+                        && announcement.device != me.device
+                    {
+                        let at_ms = started.elapsed().as_millis() as u64;
+                        let changed = view.observe_from(announcement, Some(from), at_ms);
+                        if changed && let Some(peer) = view.get(&announcement.device) {
+                            let kind = match announcement.kind {
+                                Kind::Hello => EventKind::Appeared,
+                                Kind::Bye => EventKind::SaidGoodbye,
+                            };
+                            let _ = events.send(TimedEvent {
+                                event: Event { peer, kind },
+                                at_ms,
+                            });
+                        }
+                    }
                 }
-                let at_ms = started.elapsed().as_millis() as u64;
-                let changed = view.observe_from(announcement, Some(from), at_ms);
-                if changed && let Some(peer) = view.get(&announcement.device) {
-                    let kind = match announcement.kind {
-                        Kind::Hello => EventKind::Appeared,
-                        Kind::Bye => EventKind::SaidGoodbye,
-                    };
-                    let _ = events.send(TimedEvent {
-                        event: Event { peer, kind },
-                        at_ms,
-                    });
-                }
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(_) => thread::sleep(Duration::from_millis(LOOP_SLICE_MS)),
             }
-            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-            Err(_) => thread::sleep(Duration::from_millis(LOOP_SLICE_MS)),
         }
 
         // 3. Leases.
@@ -526,7 +599,32 @@ fn serve(
 /// Unicast datagrams sent to this port are received as well. That is acceptable:
 /// [`Announcement::decode`] checks the magic first and drops anything that is not
 /// ours.
-fn bind_multicast(config: LanConfig) -> Result<UdpSocket> {
+fn bind_multicast(config: LanConfig) -> Result<Vec<Arc<UdpSocket>>> {
+    let addresses = match config.interface {
+        Some(address) => vec![address],
+        None => candidate_interfaces(),
+    };
+
+    let mut bound = Vec::new();
+    for address in addresses {
+        if let Ok(socket) = bind_one(config, address) {
+            bound.push(Arc::new(socket));
+        }
+    }
+
+    if bound.is_empty() {
+        bound.push(Arc::new(bind_one(config, Ipv4Addr::UNSPECIFIED)?));
+    }
+
+    Ok(bound)
+}
+
+/// Binds one socket to `address`, joins the group on it, and sends multicast from it.
+///
+/// Binding to the address rather than to the wildcard is what keeps the sockets apart: a
+/// datagram that arrives on one interface is delivered to the socket that joined the group
+/// there, so the same announcement is not processed once per interface.
+fn bind_one(config: LanConfig, address: Ipv4Addr) -> Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
         .map_err(|_| Error::LanSocket { operation: "new" })?;
 
@@ -536,16 +634,24 @@ fn bind_multicast(config: LanConfig) -> Result<UdpSocket> {
             operation: "set_reuse_address",
         })?;
 
-    let bind_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.port));
+    let bind_addr = SocketAddr::V4(SocketAddrV4::new(address, config.port));
     socket
         .bind(&bind_addr.into())
         .map_err(|_| Error::LanSocket { operation: "bind" })?;
 
     socket
-        .join_multicast_v4(&config.group, &Ipv4Addr::UNSPECIFIED)
+        .join_multicast_v4(&config.group, &address)
         .map_err(|_| Error::LanSocket {
             operation: "join_multicast",
         })?;
+
+    if !address.is_unspecified() {
+        socket
+            .set_multicast_if_v4(&address)
+            .map_err(|_| Error::LanSocket {
+                operation: "set_multicast_if",
+            })?;
+    }
 
     socket
         .set_multicast_loop_v4(true)
@@ -564,22 +670,70 @@ fn bind_multicast(config: LanConfig) -> Result<UdpSocket> {
 
 /// Encodes an announcement and sends it to the configured group address.
 fn send_datagram(
-    socket: &Arc<UdpSocket>,
+    sockets: &[Arc<UdpSocket>],
     config: LanConfig,
     announcement: &Announcement,
 ) -> Result<()> {
     let target = SocketAddr::V4(config.group_addr());
-    socket
-        .send_to(&announcement.encode(), target)
-        .map_err(|_| Error::LanSocket {
-            operation: "send_to",
-        })?;
-    Ok(())
+    let datagram = announcement.encode();
+    let mut sent = 0_usize;
+    let mut failure = None;
+
+    for socket in sockets {
+        match socket.send_to(&datagram, target) {
+            Ok(_) => sent += 1,
+            Err(error) => failure = Some(error),
+        }
+    }
+
+    if sent == 0 {
+        failure.map_or_else(
+            || {
+                Err(Error::LanSocket {
+                    operation: "send_to",
+                })
+            },
+            |_| {
+                Err(Error::LanSocket {
+                    operation: "send_to",
+                })
+            },
+        )
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Every candidate is an address this host can really send from**, and none of them is an
+    /// address that cannot carry discovery.
+    ///
+    /// A host with no candidate at all (only a loopback interface) passes trivially: the lobby
+    /// then falls back to letting the operating system choose.
+    #[test]
+    fn every_candidate_interface_is_an_address_of_this_host() {
+        for address in candidate_interfaces() {
+            assert!(
+                !address.is_loopback(),
+                "loopback is not a segment: {address}"
+            );
+            assert!(
+                !address.is_link_local(),
+                "link-local is not a segment: {address}"
+            );
+            assert!(
+                !address.is_unspecified(),
+                "the wildcard is not an interface"
+            );
+            assert!(
+                std::net::UdpSocket::bind((address, 0)).is_ok(),
+                "a candidate must be an address of this host, got {address}"
+            );
+        }
+    }
     use crate::lan::wire::{DATAGRAM_LEN, PeerStatus};
     use socket2::SockAddr;
     use std::sync::Mutex;
@@ -673,11 +827,15 @@ mod tests {
     /// 0 would make "where we send" and "where we bind" two different ephemeral
     /// ports, so nobody would hear anybody. Every test uses a distinct `group`, so
     /// tests running concurrently do not interfere.
+    ///
+    /// The interface is left to [`default_interface`], the same as a real caller: a test that
+    /// pinned one would stop exercising the choice that a multi-adapter host gets wrong.
     fn config(last_octet: u8, port: u16, announce_interval_ms: u64) -> LanConfig {
         LanConfig {
             group: Ipv4Addr::new(239, 255, 81, last_octet),
             port,
             announce_interval_ms,
+            interface: None,
         }
     }
 
@@ -743,7 +901,7 @@ mod tests {
         match bind_multicast(config) {
             Ok(socket) => {
                 assert_eq!(
-                    socket
+                    socket[0]
                         .local_addr()
                         .expect("must have a local address")
                         .port(),
@@ -792,7 +950,7 @@ mod tests {
         let Ok(lobby_socket) = bind_multicast(config) else {
             return;
         };
-        lobby_socket
+        lobby_socket[0]
             .set_read_timeout(Some(Duration::from_millis(400)))
             .expect("must set the read timeout");
 
@@ -813,7 +971,7 @@ mod tests {
 
         let mut buffer = [0_u8; 512];
         let mut seen = Vec::new();
-        for socket in [&external, &lobby_socket] {
+        for socket in [&external, &lobby_socket[0]] {
             if let Ok((length, _)) = socket.recv_from(&mut buffer)
                 && let Ok(decoded) = Announcement::decode(&buffer[..length])
             {
@@ -881,15 +1039,22 @@ mod tests {
             DeviceId::from_bytes([1; 32]),
             endpoint(1),
             41_010,
-            config(71, 0, 60_000),
+            LanConfig {
+                interface: Some(Ipv4Addr::LOCALHOST),
+                ..config(71, 0, 60_000)
+            },
         ) else {
             return;
         };
-        let port = lobby
-            .socket
+        let bound = lobby.sockets[0]
             .local_addr()
-            .expect("must have a local address")
-            .port();
+            .expect("must have a local address");
+        let target = if bound.ip().is_unspecified() {
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, bound.port()))
+        } else {
+            bound
+        };
+        let port = target.port();
 
         let peer = Announcement {
             kind: Kind::Hello,
@@ -898,12 +1063,9 @@ mod tests {
             endpoint_key: endpoint(2),
             port: 41_011,
         };
-        let injector = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("must bind the injector");
+        let injector = UdpSocket::bind((target.ip(), 0)).expect("must bind the injector");
         injector
-            .send_to(
-                &peer.encode(),
-                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
-            )
+            .send_to(&peer.encode(), target)
             .expect("must inject the announcement");
 
         let event = lobby
@@ -953,11 +1115,15 @@ mod tests {
         ) else {
             return;
         };
-        let port = lobby
-            .socket
+        let bound = lobby.sockets[0]
             .local_addr()
-            .expect("must have a local address")
-            .port();
+            .expect("must have a local address");
+        let target = if bound.ip().is_unspecified() {
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, bound.port()))
+        } else {
+            bound
+        };
+        let port = target.port();
         let target = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port));
         let injector = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("must bind the injector");
 
@@ -1058,11 +1224,15 @@ mod tests {
             return;
         };
 
-        let port = lobby
-            .socket
+        let bound = lobby.sockets[0]
             .local_addr()
-            .expect("must have a local address")
-            .port();
+            .expect("must have a local address");
+        let target = if bound.ip().is_unspecified() {
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, bound.port()))
+        } else {
+            bound
+        };
+        let port = target.port();
         let injector = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("must bind the injector");
         let mine = Announcement {
             kind: Kind::Hello,
