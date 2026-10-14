@@ -306,6 +306,21 @@ pub struct Peer {
     pub sequence: u64,
 }
 
+impl Peer {
+    /// The address this peer can be dialed at, when one is known.
+    ///
+    /// **The two halves come from different places.** The IP is the one [`Peer::source`] was
+    /// received from, and the port is [`Peer::port`], the endpoint's own. An announcement
+    /// travels from the lobby's socket, so the port it arrives from belongs to the lobby and
+    /// not to the endpoint; composing an address out of the datagram alone therefore points at
+    /// a socket that never answers a connection.
+    #[must_use]
+    pub fn socket(&self) -> Option<SocketAddr> {
+        self.source
+            .map(|source| SocketAddr::new(source.ip(), self.port))
+    }
+}
+
 /// Whether an announcement counts as news.
 ///
 /// # The sequence number is the only criterion
@@ -737,11 +752,16 @@ mod tests {
         );
     }
 
-    /// The address a peer can be dialed at comes from the datagram it announced in.
+    /// The address a peer can be dialed at comes from the datagram it announced in, and its
+    /// port comes from the announcement.
     ///
     /// An announcement carries no address of its own, so this is the only honest source for
     /// one, and the reason the view stores it per peer: a device that moved is dialed where it
     /// now is, and a caller that reads datagrams without a source does not erase what it knew.
+    ///
+    /// **The port is not the one the datagram came from.** Announcements leave the lobby's
+    /// socket, so the sender's port belongs to the lobby; dialing it would reach a socket that
+    /// speaks the announcement format and nothing else.
     #[test]
     fn a_peer_keeps_the_address_its_announcement_came_from() {
         let mut view = LanView::new();
@@ -753,6 +773,11 @@ mod tests {
         assert_eq!(
             view.get(&id).expect("must be in the view").source,
             Some(first)
+        );
+        assert_eq!(
+            view.get(&id).expect("must be in the view").socket(),
+            Some(SocketAddr::new(first.ip(), 41_007)),
+            "the address is where it was heard from, with the port it announced"
         );
 
         assert!(
