@@ -205,6 +205,13 @@ claim in public material that this channel is proven to stay offline.
   wrong", with no variable-length parsing that input could steer. The multicast TTL is
   fixed at 1: an announcement that drifts to another segment would make "a machine from the
   office next door shows up in the device list" a real, unexplainable symptom.
+- **Discovery runs on every candidate interface at once.** Whether anyone else is on an
+  interface is a question about a **broadcast domain**, not about a route: on a machine with a
+  VPN tunnel, a hypervisor bridge or a container network, picking one interface by route can
+  join the group where nobody announces — hearing nobody, and reporting no failure. Each
+  candidate therefore gets its own socket, and all of them join, send and listen; an interface
+  that leads nowhere costs one datagram. **No interface is guessed, and none is excluded by
+  name** — a bridge into a real segment is a real segment. `LanConfig::interface` pins one.
 - **Both the list and the inbox are bounded.** A device id is public information, so any
   machine on the segment can invent unlimited "new devices" at 84 bytes each. The peer list
   is therefore bounded and evicts the least recently heard entries, and a full inbox drops
