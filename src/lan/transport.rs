@@ -741,6 +741,14 @@ async fn ensure_connection(
             operation: "connect",
         })?;
     lock(&state.connections).insert(device, connecting.clone());
+
+    // **The dialing side reads the connection too.** A peer that has something to send finds a
+    // connection already open (it is in its own table, recorded when the first message arrived)
+    // and reuses it rather than dialing back, so the answer arrives on this connection and
+    // nobody would accept its stream otherwise. Reading it here is what makes a second message
+    // in the other direction possible; without it the send is accepted, written, and never
+    // taken off the wire.
+    tokio::spawn(read_connection(Arc::clone(state), connecting.clone()));
     Ok(connecting)
 }
 
@@ -912,6 +920,49 @@ mod tests {
             "the owner of this connection must be remembered after a message arrives, got {:?}",
             b.connected_peers()
         );
+    }
+
+    /// **An answer needs no address for the peer**: the connection the first message arrived on
+    /// is reused, and the side that dialed it reads what comes back.
+    ///
+    /// The address is deliberately removed from the answering side's table, because an
+    /// endpoint that reports its own sockets as the wildcard address cannot supply one: being
+    /// registered with `socket: None` and holding a live connection is the state a received
+    /// announcement leaves a peer in. A connection nobody accepts a stream on would swallow
+    /// this message and report the send as accepted.
+    ///
+    /// # Skipping
+    ///
+    /// Only the first hop may be skipped, for a machine whose loopback QUIC does not work. Once
+    /// it has arrived, a missing answer **fails** the test rather than skipping it: that is the
+    /// difference between "no loopback here" and "the reverse direction is broken".
+    ///
+    /// Needs real loopback traffic.
+    #[test]
+    fn an_answer_reuses_the_connection_and_needs_no_address() {
+        let Some((a, b)) = pair(8, 9) else {
+            return;
+        };
+
+        b.remember_peer(PeerAddress::new(device(8), a.endpoint_key(), None));
+
+        if a.send_blocking(Recipient::One(device(9)), b"question")
+            .is_err()
+        {
+            return;
+        }
+        let Ok((_, received)) = b.receive_timeout(Duration::from_secs(5)) else {
+            return;
+        };
+        assert_eq!(received, b"question");
+
+        b.send_blocking(Recipient::One(device(8)), b"answer")
+            .expect("the answer must be accepted: a connection to that peer is open");
+        let (sender, received) = a
+            .receive_timeout(Duration::from_secs(5))
+            .expect("the answer must arrive on the connection the question opened");
+        assert_eq!(sender, device(9), "the answer comes from the other device");
+        assert_eq!(received, b"answer");
     }
 
     /// Sending to an unregistered peer is an error **at once**, not a silent drop.
