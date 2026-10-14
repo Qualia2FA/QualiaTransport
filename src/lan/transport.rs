@@ -396,8 +396,10 @@ impl IrohLan {
     /// This endpoint's port (taken from the first bound socket).
     ///
     /// Used by the route that puts connection information into a QR code: the code carries the
-    /// endpoint public key and the port but no IP — the peer finds the IP in its own routing
-    /// table, and a hard-coded IP would break users on another segment.
+    /// endpoint public key and this port, and **no address**. Only the party that receives a
+    /// datagram from this endpoint learns where it is, so a code on its own identifies a peer
+    /// without making it reachable; a hard-coded address would in turn be wrong for a user on
+    /// another segment.
     #[must_use]
     pub fn port(&self) -> Option<u16> {
         self.bound_sockets().first().map(SocketAddr::port)
@@ -761,8 +763,8 @@ mod tests {
     /// Both endpoints bind a system-chosen port, and `socket` in a [`PeerAddress`] is
     /// optional: without it iroh has an endpoint public key and no address at all, so nothing
     /// can be dialled. This is the shape of the QR-code route in a real deployment (the code
-    /// carries the public key and the port, the peer finds the IP), with the IP filled in as
-    /// the local loopback.
+    /// carries the public key and the port, and an address arrives by another route), with the
+    /// address filled in as the local loopback.
     ///
     /// Returns `None` when either endpoint cannot be opened, so a machine with no usable
     /// loopback skips the tests built on it.

@@ -47,6 +47,8 @@ while let Some(event) = lobby.try_poll() {
 }
 
 // 跨网段（组播到不了）时，把连接信息放进二维码带外传过去。
+// 记录里只有端点公钥与端口，**没有地址**：要接上还差一个 IP，而它只有收到过对方报文的
+// 一方才知道（就是上面 event.peer.source），所以带外那一步传的是「要找谁」。
 let bytes = LanAddress::new(my_endpoint_key, my_port).encode();
 ```
 

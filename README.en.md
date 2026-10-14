@@ -52,7 +52,9 @@ while let Some(event) = lobby.try_poll() {
 }
 
 // Across segments, where multicast does not reach, carry the connection info in a QR code
-// instead.
+// instead. The record holds the endpoint key and the port and **no address**: dialing also
+// needs an IP, and only the party that received a datagram from the peer has one (that is
+// `event.peer.source` above), so what travels out of band is who to look for.
 let bytes = LanAddress::new(my_endpoint_key, my_port).encode();
 ```
 
