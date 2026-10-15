@@ -66,11 +66,14 @@
 //! net_report_config(minimal)  // HTTPS probing and captive-portal checks off
 //! ```
 //!
-//! An address reaches a peer out of band, inside a QR code ([`crate::lan::LanAddress`]), or is
-//! discovered within one network segment by [`crate::lan::lobby`]; iroh 1.x has no built-in
-//! mDNS. The TLS backend is `tls-ring`. The module sits behind the `iroh-lan` feature, which
-//! is **off by default**; enabling it raises the MSRV of that build to **1.91**, the version
-//! iroh 1.3.0 declares.
+//! An address reaches a peer out of band, inside a QR code
+//! ([`crate::lan::LanAddress::to_qr_symbols`] on the displaying side,
+//! [`crate::lan::LanAddressScanner`] on the scanning side), or is discovered within one network
+//! segment by [`crate::lan::lobby`]; iroh 1.x has no built-in mDNS. The TLS backend is
+//! `tls-ring`. The module sits behind the `iroh-lan` feature, which is **off by default**;
+//! enabling it raises the MSRV of that build to **1.91**, the version iroh 1.3.0 declares,
+//! while the manifest's `rust-version` states the default build's floor of 1.89 (Cargo has no
+//! per-feature MSRV field, so the two numbers are stated here and in the README).
 //!
 //! A message is framed as `kind (1) | device id (32) | payload`, and the device id is the
 //! sender's own (see `ENVELOPE_HEADER_LEN` below).

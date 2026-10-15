@@ -94,6 +94,14 @@
 //! thread), and the decisions inside it are kept to a minimum: all the reasoning lives in
 //! [`lan::wire`], so properties such as "three devices converge on one view" can be verified
 //! in a single process, without a network.
+//!
+//! # Supported toolchains
+//!
+//! The default build supports **Rust 1.89** (the manifest's `rust-version`). Enabling the
+//! default-off `iroh-lan` feature raises that floor to **1.91**, the `rust-version` iroh 1.3.0
+//! declares; Cargo has one `rust-version` per package and no per-feature equivalent, so that
+//! field states the default build's floor and the feature's floor is documented in the
+//! manifest and in the `lan::transport` module (which exists only with that feature).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

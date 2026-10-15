@@ -223,7 +223,8 @@ cargo test --no-default-features --all-targets
 cargo clippy --all-targets --features iroh-lan -- -D warnings     # 局域网数据面
 cargo test --features iroh-lan
 cargo doc --no-deps            # 不得有警告（配 RUSTDOCFLAGS="-D warnings"）
-cargo +1.89 check --all-targets
+cargo +1.89 check --all-targets                        # 默认构建的下限
+cargo +1.91 check --all-targets --features iroh-lan    # iroh-lan 的下限
 cargo deny check
 ```
 
@@ -241,10 +242,21 @@ cargo +nightly fuzz run lan_datagram -- -max_total_time=60
 
 ### MSRV 策略
 
-最低支持 Rust **1.89**，但「所有 feature 组合都在 1.89 上成立」这句话**不成立**：
-`iroh-lan` 要求 **1.91**（iroh 1.3.0 声明的 `rust-version`）。因此 CI 的 MSRV 那一关
-测的是不带 `iroh-lan` 的两种组合，带它的组合由 stable 工具链覆盖。MSRV 会随依赖的
-实际需要提升，但每次提升都要在 CI 里用真实工具链验证过。
+| 构建 | 最低支持 Rust |
+|------|----------------|
+| 默认构建（以及 `--no-default-features`，两者只差图像解码） | **1.89** |
+| 打开 `iroh-lan` 的构建 | **1.91** |
+
+两个数字都来自依赖的声明：1.89 是本项目统一钉住的那个工具链版本；1.91 是 iroh 1.3.0
+及其拉进来的包（`iroh-base`、`iroh-dns`、`iroh-relay`、`netwatch` 等）声明的
+`rust-version`。Cargo 的 `rust-version` 是**每个包一个**、没有按 feature 区分的写法，
+所以清单里那个字段写的是默认构建的下限，`iroh-lan` 的下限写在清单里该 feature 的注释、
+`src/lan/transport.rs` 的模块文档和这里。
+
+CI 用真实工具链分别验证两个下限：`cargo +1.89 check` 跑不带 `iroh-lan` 的两种组合，
+`cargo +1.91 check --features iroh-lan`（含 `--no-default-features`）跑带它的组合。在低于
+1.91 的工具链上打开该 feature，Cargo 会直接停下并列出要求 1.91 的包——这条差异不会
+静默通过。
 
 ## 许可
 

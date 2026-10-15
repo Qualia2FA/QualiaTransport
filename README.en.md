@@ -276,7 +276,8 @@ cargo test --no-default-features --all-targets
 cargo clippy --all-targets --features iroh-lan -- -D warnings     # LAN data plane
 cargo test --features iroh-lan
 cargo doc --no-deps            # no warnings (with RUSTDOCFLAGS="-D warnings")
-cargo +1.89 check --all-targets
+cargo +1.89 check --all-targets                        # floor of the default build
+cargo +1.91 check --all-targets --features iroh-lan    # floor with iroh-lan
 cargo deny check
 ```
 
@@ -294,11 +295,23 @@ cargo +nightly fuzz run lan_datagram -- -max_total_time=60
 
 ### MSRV policy
 
-The minimum supported Rust version is **1.89**, but "every feature combination holds on
-1.89" is **not** true: `iroh-lan` requires **1.91** (the `rust-version` iroh 1.3.0
-declares). CI's MSRV job therefore covers the two combinations without `iroh-lan`, and the
-combination with it is covered by the stable toolchain. The MSRV moves with what the
-dependencies actually need, and every move is verified in CI with a real toolchain.
+| Build | Minimum supported Rust |
+|-------|------------------------|
+| Default build (and `--no-default-features`; the two differ only in image decoding) | **1.89** |
+| Build with `iroh-lan` enabled | **1.91** |
+
+Both numbers come from what the dependencies declare: 1.89 is the single toolchain version
+this project pins, and 1.91 is the `rust-version` of iroh 1.3.0 and of the packages it pulls
+in (`iroh-base`, `iroh-dns`, `iroh-relay`, `netwatch`, ...). Cargo's `rust-version` is **one
+value per package** with no per-feature equivalent, so the manifest field states the default
+build's floor while the `iroh-lan` floor is stated in the comment on that feature in the
+manifest, in the module documentation of `src/lan/transport.rs`, and here.
+
+CI verifies both floors with the real toolchains: `cargo +1.89 check` covers the two
+combinations without `iroh-lan`, and `cargo +1.91 check --features iroh-lan` (including
+`--no-default-features`) covers the ones with it. On a toolchain below 1.91, enabling that
+feature stops Cargo with a list of the packages that require 1.91, so the difference cannot
+pass silently.
 
 ## License
 

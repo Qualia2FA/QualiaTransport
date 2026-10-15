@@ -5,6 +5,17 @@ edition = "2024"
 # MSRV, the same as the rest of the repositories. This crate's own code compiles
 # on 1.85, and the tightest link is `rqrr` (1.85.1); the floor is pinned at 1.89
 # so that the whole project names a single toolchain number.
+#
+# This field states the floor of the **default build** (and of
+# `--no-default-features`: the two differ only in image decoding). Enabling the
+# default-off `iroh-lan` feature raises the floor of that build to **1.91**,
+# iroh 1.3.0's own `rust-version`; Cargo has one `rust-version` per package and
+# no per-feature equivalent, so the feature's floor is stated in the comment on
+# `iroh-lan` below, in the README's MSRV policy, and in the module
+# documentation of `src/lan/transport.rs`. Cargo itself reports the difference:
+# building with `iroh-lan` on a toolchain below 1.91 stops with the names of the
+# packages that require it, so the gap cannot go unnoticed. CI checks both
+# floors with real toolchains.
 rust-version = "1.89"
 license = "LGPL-3.0-or-later"
 description = "Transport channels for Qualia2FA: QR code carriage and LAN discovery."
@@ -99,6 +110,10 @@ socket2 = { version = "0.6", default-features = false, features = ["all"] }
 # handshake, loss recovery, and "confirm the peer's identity without trusting
 # the network" are three things this project should not reimplement.
 #
+# iroh 1.3.0 declares `rust-version` 1.91, so enabling the feature raises the
+# MSRV of the build above the 1.89 this manifest names; see the `iroh-lan`
+# feature below.
+#
 # **Default features are off**: the default set's `portmapper` opens port
 # mappings on the router (an extra network action that also requires
 # UPnP/NAT-PMP support), while this project's LAN channel only requires
@@ -123,6 +138,13 @@ default = ["scan-image"]
 # Reads QR codes from **images** (image import scanning).
 scan-image = ["dep:rqrr"]
 # The LAN data plane (iroh's offline configuration).
+#
+# **Enabling this raises the MSRV of the build to 1.91**, the floor iroh 1.3.0
+# and the packages it pulls in (`iroh-base`, `iroh-dns`, `iroh-relay`,
+# `netwatch`, ...) declare; the default build supports 1.89. Both numbers are
+# checked in CI with real toolchains, and the manifest's `rust-version` states
+# the default build's floor because Cargo cannot state one per feature (see the
+# comment on that field).
 #
 # The TLS backend is `ring` rather than `aws-lc-rs`: `aws-lc-rs` is for
 # transport layers that leave the network, where the `X25519MLKEM768` hybrid KEM
