@@ -84,7 +84,7 @@
 //! to fail is returning an [`Error`].
 //!
 //! The same contract covers panics inside **dependencies**, at the cost of one convergence
-//! point: every call into the image decoder (`rqrr`) from [`qr::scan`] is wrapped in
+//! point: every call into the image decoder (`rqrr`) from `qr::scan` is wrapped in
 //! `catch_unwind`, which turns an upstream assertion failure into
 //! [`Error::QrDecoderPanicked`]. That is **containment, not a fix** (the fix belongs
 //! upstream), and it relies on unwinding: on a platform side built with `panic = "abort"`,

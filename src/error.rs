@@ -133,7 +133,7 @@ pub enum Error {
 
     /// The image contains no readable QR code.
     ///
-    /// Separate from [`Error::QrDecode`]: this one means "not even localization succeeded",
+    /// Separate from `Error::QrDecode`: this one means "not even localization succeeded",
     /// rather than "one was found but could not be read". The former usually means the image
     /// contains no code at all (or it is too small or too blurry).
     #[error("no QR code was found in the image")]
