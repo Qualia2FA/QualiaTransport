@@ -23,8 +23,12 @@
 //! bytes one by one into [`Announcement::decode`] — that is, this is the only parsing path in
 //! this crate driven directly by strangers over the network.
 //!
-//! The second path is [`LanAddress::decode`], which parses the text inside a QR code, and QR
-//! codes are public.
+//! The second path is [`LanAddress::decode`], which parses the bytes inside a QR code, and QR
+//! codes are public. Those bytes do not reach the application directly: they travel in the QR
+//! text envelope (`Q2FA1:<index>/<count>:<BASE32>`, usually split across several codes), which
+//! is what [`LanAddressScanner`] reads. This target therefore puts the input through **both**
+//! routes, so the conversion a scan really performs is covered and not only the byte parser
+//! underneath it.
 //!
 //! # Properties
 //!
@@ -41,14 +45,26 @@
 //! 4. **The view stays bounded under pressure** — a datagram carries a 32-byte device identity,
 //!    so every datagram can be a "new device". The view must keep only a fixed number of peers,
 //!    otherwise any machine on the subnet can exhaust our memory by announcing forever.
+//! 5. **The QR route carries exactly the bytes it was given** — a connection record put through
+//!    the envelope and the frames comes back as the record those bytes spell, and the text of
+//!    the completed single-frame record is the text that was fed in.
 
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use qualia_transport::lan::{LanAddress, wire};
+use qualia_transport::envelope;
+use qualia_transport::frame;
+use qualia_transport::lan::wire;
+use qualia_transport::lan::{LanAddress, LanAddressScanner};
 
 /// Datagram length: equal to [`wire::DATAGRAM_LEN`].
 const DATAGRAM_LEN: usize = wire::DATAGRAM_LEN;
+
+/// Frame capacities the QR route is exercised with.
+///
+/// A record is `ADDRESS_LEN` (42) bytes; 1 and 2 cut it into many codes, 43 and 64 leave it
+/// whole, and the split points decide which frames the scanner sees.
+const FRAME_CAPACITIES: [usize; 4] = [1, 2, 43, 64];
 
 fuzz_target!(|data: &[u8]| {
     check_announcement(data);
@@ -56,6 +72,8 @@ fuzz_target!(|data: &[u8]| {
     check_address(data);
 
     check_view(data);
+
+    check_qr_route(data);
 });
 
 /// ① Parse the whole input as a single announcement and check the round trip.
@@ -171,4 +189,58 @@ fn check_view(data: &[u8]) {
         view.len() <= distinct.len(),
         "the view must not hold more peers than the distinct devices in the input"
     );
+}
+
+/// ④ Put the input through the QR route a scan really performs: the envelope text of one code,
+/// and the frames of a split record, both fed to [`LanAddressScanner`].
+///
+/// The route must be **lossless**: it carries the bytes it was given, so whatever the scanner
+/// hands out has to be the record those same bytes spell (and nothing at all when they spell no
+/// record), and a single code's text has to be reproducible from the record it completed. The
+/// plain byte parser is covered by `check_address`; this function covers the conversion on top
+/// of it, including the scanner's repeat and restart bookkeeping.
+fn check_qr_route(data: &[u8]) {
+    let text = envelope::encode(data);
+    let mut scanner = LanAddressScanner::new();
+    if let Ok(Some(address)) = scanner.push(&text) {
+        let expected =
+            LanAddress::decode(data).expect("a single-frame text completed with these bytes");
+        assert_eq!(
+            address, expected,
+            "the record from the text must be the record those bytes spell"
+        );
+        assert_eq!(
+            address.to_qr_text(),
+            text,
+            "one record has exactly one single-code text"
+        );
+    }
+
+    for capacity in FRAME_CAPACITIES {
+        let Ok(frames) = frame::encode_frames(data, capacity) else {
+            continue;
+        };
+        let mut scanner = LanAddressScanner::new();
+        let mut done = None;
+        for frame in &frames {
+            match scanner.push(frame) {
+                Ok(payload) => done = payload,
+                Err(_) => {
+                    done = None;
+                    break;
+                }
+            }
+        }
+        match LanAddress::decode(data) {
+            Ok(expected) => assert_eq!(
+                done,
+                Some(expected),
+                "a split record of {capacity}-byte frames must reassemble to the same record"
+            ),
+            Err(_) => assert!(
+                done.is_none(),
+                "bytes that spell no record must not complete one"
+            ),
+        }
+    }
 }

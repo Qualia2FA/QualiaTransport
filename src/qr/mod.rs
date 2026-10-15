@@ -331,19 +331,7 @@ impl QrProfile {
     /// in this module rather than a property of the caller's input) is likewise reported as
     /// [`Error::PayloadTooLarge`] instead of a panic.
     pub fn encode_payload_frames(&self, payload: &[u8], max_frames: u32) -> Result<Vec<Symbol>> {
-        let limit = self.exchange_capacity(max_frames);
-        if payload.len() > limit {
-            return Err(Error::PayloadTooLarge {
-                needed: payload.len(),
-                limit,
-            });
-        }
-        if payload.len() <= self.payload_capacity {
-            return Ok(vec![self.encode_payload(payload)?]);
-        }
-
-        let texts = crate::frame::encode_frames(payload, self.frame_capacity)?;
-        texts
+        self.frame_texts(payload, max_frames)?
             .iter()
             .map(|text| {
                 encode_within(text, self.ec, self.max_version).ok_or(Error::PayloadTooLarge {
@@ -352,6 +340,44 @@ impl QrProfile {
                 })
             })
             .collect()
+    }
+
+    /// Splits a payload into the frame texts this channel displays, one text per code.
+    ///
+    /// # One decision point for the texts and the symbols
+    ///
+    /// The capacity check (never more than [`QrProfile::exchange_capacity`]`(max_frames)`) and
+    /// the split point both live here and only here. [`QrProfile::encode_payload_frames`] and
+    /// [`crate::lan::LanAddress::to_qr_frame_texts`] differ in what they do with the texts —
+    /// encode them into symbols, or hand them to a caller that renders elsewhere — never in how
+    /// the texts are produced; a second copy of the rule would let a code say `1/1` while the
+    /// payload it carries was cut in three.
+    ///
+    /// A payload that fits [`QrProfile::payload_capacity`] is **not** split (the single-frame
+    /// text is shorter), and one that does not is cut at
+    /// [`QrProfile::frame_payload_capacity`] — the capacity for a full frame, which is smaller
+    /// (see [`crate::frame::encode_frames`]).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::PayloadTooLarge`]: the payload exceeds
+    ///   [`QrProfile::exchange_capacity`]`(max_frames)`. `needed` and `limit` are both in
+    ///   **payload bytes**.
+    /// - [`Error::TooManyFrames`]: the payload needs more frames than the format can express.
+    ///   Unreachable from here, since the exchange capacity is clamped to
+    ///   [`envelope::MAX_FRAMES`]; it is reported rather than unwrapped.
+    pub(crate) fn frame_texts(&self, payload: &[u8], max_frames: u32) -> Result<Vec<String>> {
+        let limit = self.exchange_capacity(max_frames);
+        if payload.len() > limit {
+            return Err(Error::PayloadTooLarge {
+                needed: payload.len(),
+                limit,
+            });
+        }
+        if payload.len() <= self.payload_capacity {
+            return Ok(vec![envelope::encode(payload)]);
+        }
+        crate::frame::encode_frames(payload, self.frame_capacity)
     }
 }
 

@@ -25,7 +25,8 @@ use proptest::prelude::*;
 use qualia_transport::Error;
 use qualia_transport::envelope;
 use qualia_transport::frame::{self, Reassembler};
-#[cfg(feature = "scan-image")]
+use qualia_transport::lan::wire::EndpointKey;
+use qualia_transport::lan::{LanAddress, LanAddressScanner};
 use qualia_transport::qr::{EcLevel, QrProfile};
 
 /// Arbitrary byte strings (bounded length).
@@ -189,5 +190,80 @@ proptest! {
             prop_assert_eq!(bytes, frame.payload);
         }
         prop_assert!(reassembler.received() <= 1);
+    }
+
+    /// A LAN connection record must survive the QR text round trip for **every** endpoint key
+    /// and port: that text is the only thing that travels between the two devices.
+    #[test]
+    fn lan_address_qr_text_round_trips(
+        key in prop::array::uniform32(any::<u8>()),
+        port in 1_u16..=u16::MAX,
+    ) {
+        let address = LanAddress::new(EndpointKey::from_bytes(key), port);
+        let decoded = LanAddress::from_qr_text(&address.to_qr_text())
+            .expect("a self-encoded text must decode");
+        prop_assert_eq!(decoded, address);
+    }
+
+    /// Whatever the single-code entry point accepts must be the **canonical** spelling: encode
+    /// it back and it decodes to the same record. Otherwise one record would have several legal
+    /// texts, while "is this still the peer I scanned" compares texts for equality.
+    #[test]
+    fn lan_address_from_qr_text_never_panics(text in arb_text()) {
+        if let Ok(address) = LanAddress::from_qr_text(&text) {
+            let canonical = address.to_qr_text();
+            let again =
+                LanAddress::from_qr_text(&canonical).expect("the canonical spelling must decode");
+            prop_assert_eq!(again, address);
+        }
+    }
+
+    /// A record split for a narrow channel comes back through the scanner **in any order**, and
+    /// a code of the completed record is a repeat rather than the start of a second one.
+    #[test]
+    fn a_split_lan_address_reassembles_in_any_order(
+        key in prop::array::uniform32(any::<u8>()),
+        port in 1_u16..=u16::MAX,
+    ) {
+        let profile = QrProfile::new(EcLevel::Low, 3).expect("the version is legal");
+        let address = LanAddress::new(EndpointKey::from_bytes(key), port);
+        let texts = address
+            .to_qr_frame_texts(&profile, 8)
+            .expect("eight codes of this channel hold the record");
+        prop_assert!(
+            texts.len() > 1,
+            "a version 3 code cannot hold the record in one code"
+        );
+
+        let mut scanner = LanAddressScanner::new();
+        let mut done = None;
+        for text in texts.iter().rev() {
+            done = scanner
+                .push(text)
+                .expect("a code it split itself must be accepted");
+        }
+        prop_assert_eq!(done.expect("must reassemble"), address);
+
+        let repeated = scanner
+            .push(&texts[0])
+            .expect("a repeated code is not an error");
+        prop_assert!(
+            repeated.is_none(),
+            "a code of the completed record must be a repeat"
+        );
+    }
+
+    /// **Arbitrary text** must not panic the scanner, which is the entry point for whatever a
+    /// camera hands back, and a record it completes from **one** text must be the record that
+    /// the single-code entry point reads out of that same text.
+    #[test]
+    fn the_lan_address_scanner_never_panics(text in arb_text()) {
+        let mut scanner = LanAddressScanner::new();
+        if let Ok(Some(address)) = scanner.push(&text) {
+            prop_assert_ne!(address.port, 0);
+            let direct = LanAddress::from_qr_text(&text)
+                .expect("a record completed by one text must be readable from that text");
+            prop_assert_eq!(direct, address);
+        }
     }
 }

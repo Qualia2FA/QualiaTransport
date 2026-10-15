@@ -45,6 +45,17 @@
 //! the receiver dials it directly. Both routes produce the **same kind of connection**, so
 //! the protocol layer does not need to know which one the user took.
 //!
+//! The conversion between a record and QR text is part of this module, and it goes **through**
+//! the QR half rather than around it: a record is a [`ADDRESS_LEN`]-byte payload, so
+//! [`LanAddress::to_qr_symbols`] hands it to
+//! [`crate::qr::QrProfile::encode_payload_frames`], which applies the channel's capacity and
+//! splits it across several codes when one cannot hold it, and
+//! [`LanAddress::to_qr_frame_texts`] is the same split as text (both share one split point in
+//! [`crate::qr::QrProfile`]). The receiving side is [`LanAddressScanner`], which collects those
+//! codes through the same [`Reassembler`] the generic QR route uses — any order, repeats
+//! allowed, capacity unknown. [`LanAddress::to_qr_text`] and [`LanAddress::from_qr_text`] are
+//! the single-code form of the same conversion, for a medium that carries one string.
+//!
 //! # Purity
 //!
 //! [`wire`] is pure logic: no sockets, no clock, every input is a parameter, so properties
@@ -64,7 +75,10 @@ pub mod wire;
 #[cfg(feature = "iroh-lan")]
 pub mod transport;
 
+use crate::envelope;
 use crate::error::{Error, Result};
+use crate::frame::Reassembler;
+use crate::qr::{QrProfile, Symbol};
 use wire::EndpointKey;
 
 /// Prefix that marks LAN connection information inside a QR code.
@@ -108,6 +122,16 @@ pub const ADDRESS_LEN: usize = ADDRESS_PREFIX.len() + 1 + wire::ENDPOINT_KEY_LEN
 /// thing: **a digit copied or read off wrongly by a human**. Without it, a mistyped port sends
 /// the peer to a port nobody listens on, and the failure surfaces as a connection timeout
 /// rather than as "the code was copied wrong".
+///
+/// # Carrying it in a QR code
+///
+/// The record is a payload like any other, so the QR half carries it unchanged:
+/// [`LanAddress::to_qr_symbols`] renders it for a channel (capacity and splitting included),
+/// [`LanAddress::to_qr_frame_texts`] gives the same codes as text, and
+/// [`LanAddress::to_qr_text`] / [`LanAddress::from_qr_text`] are the single-code form. The
+/// receiving side collects the codes with [`LanAddressScanner`]. At level L, version 4 is the
+/// smallest version whose code holds the whole record, so a channel capped below that splits
+/// it — which is why the multi-code path exists at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LanAddress {
     /// The peer's transport endpoint public key.
@@ -193,6 +217,81 @@ impl LanAddress {
             port,
         })
     }
+
+    /// The QR text of this record in **one** code: `Q2FA1:1/1:<BASE32>` over
+    /// [`LanAddress::encode`].
+    ///
+    /// The frame header says `1/1`, so [`LanAddress::from_qr_text`] reads it back with no
+    /// reassembly state at all, and the whole string stays inside the QR alphanumeric mode
+    /// (see [`crate::envelope`]).
+    ///
+    /// # It checks no capacity
+    ///
+    /// Whether a code can hold these 78 characters is a property of the **displaying side's**
+    /// channel, and this method has no channel to ask: it serves a medium that carries one
+    /// string — a clipboard, a chat message, a code the caller renders elsewhere. Use
+    /// [`LanAddress::to_qr_symbols`] or [`LanAddress::to_qr_frame_texts`] when the capacity
+    /// has to be respected: a small channel splits the record across several codes, and a
+    /// `1/1` text would then be a claim that no displayed code can back up.
+    #[must_use]
+    pub fn to_qr_text(&self) -> String {
+        envelope::encode(&self.encode())
+    }
+
+    /// Reads a record back out of the QR text of **one** code.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotOurQrText`], [`Error::MalformedFrameHeader`], [`Error::MalformedBase32`]:
+    ///   the text is not a QR envelope of this application.
+    /// - [`Error::MultiFrameUnsupported`]: the text is one code of a split record; feed the
+    ///   codes to [`LanAddressScanner`] instead.
+    /// - [`Error::NotOurLanAddress`], [`Error::BadLanAddressLength`],
+    ///   [`Error::UnsupportedDatagramVersion`], [`Error::MalformedFrameHeader`],
+    ///   [`Error::ZeroPort`]: the envelope decoded, but what it carried is not a valid record
+    ///   (see [`LanAddress::decode`]).
+    pub fn from_qr_text(text: &str) -> Result<Self> {
+        Self::decode(&envelope::decode(text)?)
+    }
+
+    /// Renders this record into the QR codes to display, one per code.
+    ///
+    /// # Arguments
+    ///
+    /// - `profile`: the capability of the displaying channel (error correction level and the
+    ///   highest version it will show).
+    /// - `max_frames`: how many codes the user is willing to scan.
+    ///
+    /// The capacity, the split point and the frame headers are the ones
+    /// [`crate::qr::QrProfile::encode_payload_frames`] uses for any other payload: the record
+    /// is handed over as its [`ADDRESS_LEN`] bytes, and nothing about it is special to the QR
+    /// half. A record that fits one code yields one symbol; a channel that cannot hold it
+    /// splits the record across several codes, which is what
+    /// [`LanAddress::to_qr_frame_texts`] exposes as text.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::PayloadTooLarge`]: the record does not fit
+    ///   [`crate::qr::QrProfile::exchange_capacity`]`(max_frames)` — a narrow channel (a low
+    ///   maximum version, or a single code allowed) can be too small for even these
+    ///   [`ADDRESS_LEN`] bytes. `needed`/`limit` are in **payload bytes**.
+    pub fn to_qr_symbols(&self, profile: &QrProfile, max_frames: u32) -> Result<Vec<Symbol>> {
+        profile.encode_payload_frames(&self.encode(), max_frames)
+    }
+
+    /// The **texts** of those codes, one per code, using the same split as
+    /// [`LanAddress::to_qr_symbols`].
+    ///
+    /// For a caller whose display path carries strings rather than module matrices, or that
+    /// wants the text of every code of a split record. A record that fits one code yields a
+    /// single text, byte for byte the one [`LanAddress::to_qr_text`] returns.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`LanAddress::to_qr_symbols`], with the same meaning.
+    pub fn to_qr_frame_texts(&self, profile: &QrProfile, max_frames: u32) -> Result<Vec<String>> {
+        profile.frame_texts(&self.encode(), max_frames)
+    }
 }
 
 /// 8-bit sum checksum.
@@ -205,9 +304,132 @@ fn checksum(bytes: &[u8]) -> u8 {
     bytes.iter().fold(0_u8, |acc, byte| acc.wrapping_add(*byte))
 }
 
+/// Collects the codes of one QR-carried [`LanAddress`] and hands the record back.
+///
+/// # What it is for
+///
+/// It is the receiving half of the route in which a peer's address travels inside a QR code
+/// because multicast is unavailable (see the module documentation). One code can hold the whole
+/// [`ADDRESS_LEN`]-byte record (at level L from version 4 up); a narrower channel makes
+/// [`LanAddress::to_qr_symbols`] split it, and the scanning side then has to collect the codes
+/// before the address exists.
+///
+/// # It is a [`Reassembler`] plus one step
+///
+/// Collecting is entirely [`Reassembler`]'s behaviour, unchanged: codes may arrive in **any
+/// order**, a code may be scanned again, the full-frame length is observed from the first code
+/// rather than assumed, and [`LanAddressScanner::missing`] reports what the user interface has
+/// to show. What this type adds is the last step — the completed payload is parsed back into a
+/// [`LanAddress`], so a caller never handles the record's bytes itself.
+///
+/// # Scanning one record after another
+///
+/// A text that was part of a record already handed out is recognised as **a repeat** and
+/// reports `Ok(None)`: a camera keeps firing at a screen that is not changing, and reporting
+/// the same address on every callback would be noise rather than news. Any other text starts a
+/// new record, so a screen that moves on to another address is scanned without building a new
+/// scanner. The remembered texts are bounded by the format's frame limit
+/// ([`envelope::MAX_FRAMES`]); past that bound a repeat is merely not recognised, and the
+/// scanner starts a new record instead.
+///
+/// # It does not authenticate
+///
+/// Whoever shows the code decides which endpoint a scan dials. The record is a hint, exactly
+/// like a multicast announcement (see the module documentation); the handshake on the
+/// connection that is dialed with the [`EndpointKey`] and port taken from here is what proves
+/// the peer.
+pub struct LanAddressScanner {
+    /// The frame collector, with an **unknown capacity**: the displaying side's capacity is
+    /// not available on this side (see [`Reassembler::from_first_frame`]).
+    reassembler: Reassembler,
+    /// The texts accepted for the record being collected.
+    ///
+    /// They are what tells "a code of the record just handed out" from "the first code of
+    /// another record" once the collector is complete; each one was accepted by the
+    /// reassembler, so treating it as a repeat is always correct.
+    texts: Vec<String>,
+    /// Whether the current record has been completed and handed out.
+    complete: bool,
+}
+
+impl LanAddressScanner {
+    /// Creates a scanner that has collected nothing.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            reassembler: Reassembler::from_first_frame(),
+            texts: Vec::new(),
+            complete: false,
+        }
+    }
+
+    /// Accepts the text of one code.
+    ///
+    /// Returns `Ok(None)` while codes are still missing, `Ok(Some(address))` on the code that
+    /// completes the record.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotOurQrText`], [`Error::MalformedFrameHeader`], [`Error::MalformedBase32`],
+    ///   [`Error::FrameMismatch`]: the text is not a code of this record (see
+    ///   [`Reassembler::push`]). A failing text leaves the collected codes unchanged.
+    /// - [`Error::NotOurLanAddress`], [`Error::BadLanAddressLength`],
+    ///   [`Error::UnsupportedDatagramVersion`], [`Error::MalformedFrameHeader`],
+    ///   [`Error::ZeroPort`]: the record was completed, but what it carried is not a valid
+    ///   record (see [`LanAddress::decode`]). The next text then starts a new record, so one
+    ///   malformed code cannot leave the scanner unable to scan anything else.
+    pub fn push(&mut self, text: &str) -> Result<Option<LanAddress>> {
+        let known = self.texts.iter().any(|seen| seen == text);
+        if self.complete && !known {
+            self.restart();
+        }
+
+        let completed = self.reassembler.push(text)?;
+        if !known && self.texts.len() < envelope::MAX_FRAMES as usize {
+            self.texts.push(text.to_owned());
+        }
+
+        match completed {
+            None => Ok(None),
+            Some(payload) => {
+                self.complete = true;
+                Ok(Some(LanAddress::decode(&payload)?))
+            }
+        }
+    }
+
+    /// Which codes are still missing (frame indices, ascending); empty before the first code
+    /// arrives.
+    #[must_use]
+    pub fn missing(&self) -> Vec<u32> {
+        self.reassembler.missing()
+    }
+
+    /// How many codes the record consists of; `None` until the first code arrives.
+    #[must_use]
+    pub const fn expected_codes(&self) -> Option<u32> {
+        self.reassembler.expected_frames()
+    }
+
+    /// Drops everything collected so far.
+    fn restart(&mut self) {
+        self.reassembler = Reassembler::from_first_frame();
+        self.texts.clear();
+        self.complete = false;
+    }
+}
+
+impl Default for LanAddressScanner {
+    /// Same as [`LanAddressScanner::new`].
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::qr::EcLevel;
 
     fn endpoint(seed: u8) -> EndpointKey {
         EndpointKey::from_bytes([seed; 32])
@@ -375,5 +597,289 @@ mod tests {
                 let _ = LanAddress::decode(&bytes);
             }
         }
+    }
+
+    /// The QR text of a record is pinned byte for byte.
+    ///
+    /// The expected Base32 is derived from the record's bytes by hand from the format, not
+    /// produced by this crate's encoder: a round trip through [`LanAddress::to_qr_text`] and
+    /// [`LanAddress::from_qr_text`] would only prove that the two halves agree with each other,
+    /// and stays blind to both of them encoding something other than the documented record.
+    /// The record is the one `wire_format_is_pinned` uses (key `0xBB`×32, port `0x1234`,
+    /// checksum `0x2E`), so the two tests pin the same bytes from both ends.
+    #[test]
+    fn the_qr_text_is_pinned() {
+        let address = LanAddress::new(EndpointKey::from_bytes([0xBB; 32]), 0x1234);
+        assert_eq!(
+            address.to_qr_text(),
+            "Q2FA1:1/1:KEZEMQKMGEA3XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XOYSGQXA"
+        );
+        assert_eq!(
+            address.to_qr_text().len(),
+            10 + 68,
+            "the envelope header of a single frame plus the Base32 of 42 bytes without padding"
+        );
+        assert_eq!(
+            LanAddress::from_qr_text(&address.to_qr_text()).expect("a self-encoded text decodes"),
+            address
+        );
+    }
+
+    /// Every boundary value survives the QR text round trip.
+    #[test]
+    fn qr_text_round_trips_every_boundary() {
+        for (seed, port) in [(0_u8, 1_u16), (0xFF, u16::MAX), (1, 1024), (0x80, 21_377)] {
+            let address = LanAddress::new(endpoint(seed), port);
+            let decoded = LanAddress::from_qr_text(&address.to_qr_text()).expect("round trip");
+            assert_eq!(
+                decoded, address,
+                "round trip mismatch for seed {seed} port {port}"
+            );
+        }
+    }
+
+    /// **Version 4 at level L is the smallest single code that holds the whole record**, and a
+    /// narrower channel splits it.
+    ///
+    /// The boundary is asserted against the capacities [`QrProfile`] computes from the encoder,
+    /// not against a table copied out of ISO/IEC 18004: what matters here is that "this does not
+    /// fit one code" is answered by the same code that renders, and the capacities of versions 3
+    /// and 4 are merely the shape that answer has.
+    #[test]
+    fn a_record_that_does_not_fit_one_code_is_split() {
+        let address = LanAddress::new(endpoint(0x11), 21_377);
+
+        let wide = QrProfile::new(EcLevel::Low, 4).expect("the version is legal");
+        assert!(
+            wide.payload_capacity() >= ADDRESS_LEN,
+            "version 4 at level L must hold the {ADDRESS_LEN}-byte record, it holds {}",
+            wide.payload_capacity()
+        );
+        assert_eq!(
+            address
+                .to_qr_symbols(&wide, 1)
+                .expect("one code holds the record")
+                .len(),
+            1,
+            "a record that fits one code must not be split"
+        );
+        assert_eq!(
+            address
+                .to_qr_frame_texts(&wide, 1)
+                .expect("the text of that code"),
+            vec![address.to_qr_text()],
+            "the single-code path must produce the pinned text"
+        );
+
+        let narrow = QrProfile::new(EcLevel::Low, 3).expect("the version is legal");
+        assert!(
+            narrow.payload_capacity() < ADDRESS_LEN,
+            "version 3 at level L must be too small for the {ADDRESS_LEN}-byte record, it holds {}",
+            narrow.payload_capacity()
+        );
+        let symbols = address
+            .to_qr_symbols(&narrow, 8)
+            .expect("eight codes hold the record");
+        let texts = address
+            .to_qr_frame_texts(&narrow, 8)
+            .expect("eight codes hold the record");
+        assert!(
+            symbols.len() > 1 && texts.len() == symbols.len(),
+            "the texts and the symbols must be one and the same exchange: {} symbols, {} texts",
+            symbols.len(),
+            texts.len()
+        );
+        assert!(
+            texts.iter().all(|text| text != &address.to_qr_text()),
+            "a split record must not also appear in its single-code spelling: {texts:?}"
+        );
+
+        let mut scanner = LanAddressScanner::new();
+        let mut done = None;
+        for text in texts.iter().rev() {
+            done = scanner
+                .push(text)
+                .expect("a code it split itself must be accepted");
+        }
+        assert_eq!(
+            done.expect("every code scanned means the record is complete"),
+            address
+        );
+    }
+
+    /// The single-code entry points report a split record as the wrong entry point, and
+    /// somebody else's text as foreign.
+    #[test]
+    fn the_single_code_entry_points_report_what_they_got() {
+        let address = LanAddress::new(endpoint(4), 5_555);
+        let profile = QrProfile::new(EcLevel::Low, 3).expect("the version is legal");
+        let texts = address
+            .to_qr_frame_texts(&profile, 8)
+            .expect("must split on a version 3 channel");
+        assert!(texts.len() > 1, "this record must split, got {texts:?}");
+
+        let result = LanAddress::from_qr_text(&texts[0]);
+        let is_multi = matches!(
+            result,
+            Err(Error::MultiFrameUnsupported { count }) if count == texts.len() as u32
+        );
+        assert!(
+            is_multi,
+            "a split record must report the wrong entry point, got {result:?}"
+        );
+
+        for text in ["https://example.com", "Q2FA2:1/1:MY"] {
+            let result = LanAddress::from_qr_text(text);
+            let is_foreign = matches!(result, Err(Error::NotOurQrText));
+            assert!(is_foreign, "{text} must be foreign, got {result:?}");
+        }
+
+        let result = LanAddress::from_qr_text("Q2FA1:1:MY");
+        let broken = matches!(result, Err(Error::MalformedFrameHeader));
+        assert!(
+            broken,
+            "our prefix with a broken frame header must say so, got {result:?}"
+        );
+
+        let short = envelope::encode(b"Q2FAL1");
+        let result = LanAddress::from_qr_text(&short);
+        let is_length = matches!(result, Err(Error::BadLanAddressLength { .. }));
+        assert!(
+            is_length,
+            "6 bytes must report a bad length, got {result:?}"
+        );
+
+        let other = envelope::encode(&[b'X'; ADDRESS_LEN]);
+        let result = LanAddress::from_qr_text(&other);
+        let is_address = matches!(result, Err(Error::NotOurLanAddress));
+        assert!(
+            is_address,
+            "the right length with a wrong prefix must be foreign, got {result:?}"
+        );
+
+        let mut newer = address.encode();
+        newer[6] = ADDRESS_VERSION + 1;
+        let result = LanAddress::from_qr_text(&envelope::encode(&newer));
+        let is_version = matches!(
+            result,
+            Err(Error::UnsupportedDatagramVersion { found, supported })
+                if found == ADDRESS_VERSION + 1 && supported == ADDRESS_VERSION
+        );
+        assert!(
+            is_version,
+            "a newer record must report its version, got {result:?}"
+        );
+
+        let mut scanner = LanAddressScanner::new();
+        let result = scanner.push("hello");
+        assert!(
+            matches!(result, Err(Error::NotOurQrText)),
+            "a foreign text must be foreign, got {result:?}"
+        );
+    }
+
+    /// A channel whose whole exchange cannot hold the record reports that in **payload bytes**,
+    /// through both text and symbol entry points.
+    #[test]
+    fn a_channel_too_small_for_the_record_is_rejected() {
+        let address = LanAddress::new(endpoint(2), 1_234);
+        let profile = QrProfile::new(EcLevel::Low, 1).expect("the version is legal");
+        let limit = profile.exchange_capacity(1);
+        assert!(
+            limit < ADDRESS_LEN,
+            "one version 1 code must not hold {ADDRESS_LEN} bytes, it holds {limit}"
+        );
+
+        let reports = [
+            address.to_qr_symbols(&profile, 1).map(|_| ()),
+            address.to_qr_frame_texts(&profile, 1).map(|_| ()),
+        ];
+        for result in reports {
+            match result {
+                Err(Error::PayloadTooLarge {
+                    needed,
+                    limit: reported,
+                }) => {
+                    assert_eq!(needed, ADDRESS_LEN, "the whole record is what has to fit");
+                    assert_eq!(reported, limit, "the limit must be the exchange capacity");
+                }
+                other => panic!("expected PayloadTooLarge, got {other:?}"),
+            }
+        }
+    }
+
+    /// The scanner accepts the codes of a split record **in any order** and **repeatedly**, and
+    /// hands the record out exactly once.
+    #[test]
+    fn the_scanner_accepts_any_order_and_repeats() {
+        let address = LanAddress::new(endpoint(0x33), 6_000);
+        let profile = QrProfile::new(EcLevel::Low, 3).expect("the version is legal");
+        let texts = address
+            .to_qr_frame_texts(&profile, 8)
+            .expect("must split on a version 3 channel");
+        assert!(texts.len() > 1, "this record must split, got {texts:?}");
+
+        let mut scanner = LanAddressScanner::new();
+        assert_eq!(scanner.expected_codes(), None);
+        assert_eq!(
+            scanner.push(&texts[1]).expect("the last code first"),
+            None,
+            "one code of two does not complete the record"
+        );
+        assert_eq!(scanner.expected_codes(), Some(texts.len() as u32));
+        assert_eq!(scanner.missing(), vec![1]);
+        assert_eq!(
+            scanner.push(&texts[1]).expect("a repeat is not an error"),
+            None
+        );
+        assert_eq!(
+            scanner.push(&texts[0]).expect("the first code"),
+            Some(address)
+        );
+        assert!(scanner.missing().is_empty());
+        assert_eq!(
+            scanner
+                .push(&texts[0])
+                .expect("a code of the completed record"),
+            None,
+            "a code of the record just handed out is a repeat, not a new record"
+        );
+    }
+
+    /// A **different** record after a completed one is scanned without building a new scanner.
+    #[test]
+    fn the_scanner_starts_over_on_another_record() {
+        let first = LanAddress::new(endpoint(1), 1_000);
+        let second = LanAddress::new(endpoint(2), 2_000);
+
+        let mut scanner = LanAddressScanner::new();
+        assert_eq!(
+            scanner.push(&first.to_qr_text()).expect("the first record"),
+            Some(first)
+        );
+        assert_eq!(
+            scanner
+                .push(&second.to_qr_text())
+                .expect("the second record"),
+            Some(second),
+            "another record must be scanned, not swallowed as a repeat"
+        );
+    }
+
+    /// A completed payload that is not a record is reported by its own error, and the scanner
+    /// keeps working afterwards.
+    #[test]
+    fn a_completed_payload_that_is_not_a_record_is_reported() {
+        let mut scanner = LanAddressScanner::new();
+        let result = scanner.push(&envelope::encode(&[0_u8; ADDRESS_LEN]));
+        let is_address = matches!(result, Err(Error::NotOurLanAddress));
+        assert!(is_address, "42 zero bytes are not a record, got {result:?}");
+
+        let address = LanAddress::new(endpoint(3), 4_321);
+        assert_eq!(
+            scanner.push(&address.to_qr_text()).expect("must scan"),
+            Some(address),
+            "the scanner must not be stuck after a malformed record"
+        );
     }
 }

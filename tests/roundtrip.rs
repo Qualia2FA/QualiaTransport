@@ -27,6 +27,8 @@
 use qualia_transport::Error;
 use qualia_transport::envelope;
 use qualia_transport::image::GrayImage;
+use qualia_transport::lan::wire::EndpointKey;
+use qualia_transport::lan::{LanAddress, LanAddressScanner};
 use qualia_transport::qr::{self, EcLevel, QrProfile};
 
 /// Deterministic pseudo-random payload.
@@ -397,6 +399,76 @@ fn a_multi_frame_payload_round_trips_through_pixels() {
     assert_eq!(
         done.expect("both frames scanned means it must reassemble"),
         payload
+    );
+}
+
+/// A LAN connection record displayed as a QR code is read back as the same record.
+///
+/// This walks the route "multicast is unavailable, so the peer's address travels in a QR code":
+/// [`LanAddress::to_qr_symbols`] on the displaying side, [`LanAddressScanner`] on the scanning
+/// side. Rendering and scanning are real here — pixels, not a comparison of bytes within one
+/// process — because a record that cannot be scanned is, to the user, one that was never shown.
+#[test]
+fn a_lan_address_round_trips_through_pixels() {
+    let profile = QrProfile::new(EcLevel::Medium, 6).expect("the profile is legal");
+    let address = LanAddress::new(EndpointKey::from_bytes([0x5A; 32]), 21_377);
+
+    let symbols = address
+        .to_qr_symbols(&profile, 1)
+        .expect("one code of this channel holds the record");
+    assert_eq!(
+        symbols.len(),
+        1,
+        "a record that fits one code must not be split"
+    );
+
+    let image = symbols[0]
+        .render(4, 4)
+        .expect("the render geometry is legal");
+    let text = qr::scan::decode_text(&image).expect("the code must be readable");
+    let mut scanner = LanAddressScanner::new();
+    assert_eq!(
+        scanner.push(&text).expect("the text must parse"),
+        Some(address),
+        "the record read back differs from the one displayed"
+    );
+}
+
+/// A record too large for one code is displayed as several codes and reassembled from pixels.
+///
+/// The scanning order is deliberately reversed: the codes of an animated QR arrive in whatever
+/// order the camera happens to catch them, which is what the reassembler exists for.
+#[test]
+fn a_split_lan_address_round_trips_through_pixels() {
+    let profile = QrProfile::new(EcLevel::Low, 3).expect("the profile is legal");
+    let address = LanAddress::new(EndpointKey::from_bytes([0x3C; 32]), 1_234);
+
+    let symbols = address
+        .to_qr_symbols(&profile, 4)
+        .expect("four codes of this channel hold the record");
+    assert!(
+        symbols.len() > 1,
+        "version 3 cannot hold the record in one code, got {}",
+        symbols.len()
+    );
+
+    let mut scanner = LanAddressScanner::new();
+    let mut done = None;
+    for symbol in symbols.iter().rev() {
+        let image = symbol.render(4, 4).expect("the render geometry is legal");
+        let text = qr::scan::decode_text(&image).unwrap_or_else(|error| {
+            panic!(
+                "the code of version {} cannot be read back: {error}",
+                symbol.version()
+            )
+        });
+        done = scanner
+            .push(&text)
+            .expect("a code the splitting side produced must be accepted");
+    }
+    assert_eq!(
+        done.expect("every code scanned means the record is complete"),
+        address
     );
 }
 

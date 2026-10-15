@@ -61,6 +61,12 @@
 //! itself takes whichever route has enough bandwidth**. The core library's `SharePlan` makes
 //! that decision; this crate provides both routes.
 //!
+//! The two halves meet where the LAN route needs the QR channel: when multicast is
+//! unavailable, a connection record travels out of band in a QR code. That conversion lives in
+//! [`lan`] — [`lan::LanAddress::to_qr_symbols`] renders a record into codes through the same
+//! capacity and framing path as any other payload, [`lan::LanAddressScanner`] collects them
+//! again — so a caller does not assemble it from [`qr`] and [`frame`] on its own.
+//!
 //! # Not implemented
 //!
 //! The per-platform LAN permission flows (Android 17's `ACCESS_LOCAL_NETWORK`, iOS

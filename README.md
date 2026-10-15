@@ -34,7 +34,8 @@ if let Some(payload) = reassembler.accept(frame)? {
 
 ```rust
 use qualia_transport::lan::lobby::Lobby;
-use qualia_transport::lan::LanAddress;
+use qualia_transport::lan::{LanAddress, LanAddressScanner};
+use qualia_transport::qr::{EcLevel, QrProfile};
 
 // 打开大厅：往一个组播组里周期性地报「我在这里、我的端点公钥与端口是这个」，
 // 同时听别人报。
@@ -49,7 +50,19 @@ while let Some(event) = lobby.try_poll() {
 // 跨网段（组播到不了）时，把连接信息放进二维码带外传过去。
 // 记录里只有端点公钥与端口，**没有地址**：要接上还差一个 IP，而它只有收到过对方报文的
 // 一方才知道（就是上面 event.peer.source），所以带外那一步传的是「要找谁」。
-let bytes = LanAddress::new(my_endpoint_key, my_port).encode();
+let address = LanAddress::new(my_endpoint_key, my_port);
+
+// 展示方：记录就是一段 42 字节载荷，交给二维码那一半渲染，容量检查与拆帧都由它负责，
+// 这里只说「最多愿意让用户扫 4 张」。
+let profile = QrProfile::new(EcLevel::Low, 10)?;
+let symbols = address.to_qr_symbols(&profile, 4)?;
+
+// 扫码方：把相机读到的每一段文本喂进扫描器。任意顺序、重复扫同一张都可以，
+// 拼齐的那一次返回记录。
+let mut scanner = LanAddressScanner::new();
+if let Some(address) = scanner.push(scanned_text)? {
+    // 拨过去——端点公钥与端口就是从这里来的。
+}
 ```
 
 ## 它解决的四个问题
@@ -164,6 +177,13 @@ crate 的 1.89；**「不联网」目前只到「不构建 relay、不注册 DNS
 - **局域网公告是定长 84 字节的 UDP 报文，连接信息是定长 42 字节。** 定长让解析器的
   形状就是「长度不对就拒绝」，没有一处可以被输入牵着走的变长解析。组播 TTL 固定为 1：
   公告飘到别的网段，会让「设备列表里出现隔壁办公室的机器」这种无法解释的现象成真。
+- **连接信息是一段普通载荷，走二维码那一半的容量与拆帧。** `LanAddress::to_qr_symbols`
+  把它的 42 字节交给 `QrProfile::encode_payload_frames`：一张装得下就一张（L 级第 4 版
+  起装得下），装不下就按帧切开；`LanAddress::to_qr_frame_texts` 给出同一种切法对应的
+  文本，`LanAddress::to_qr_text` / `from_qr_text` 是单张码的形式。扫码侧用
+  `LanAddressScanner`——它就是一个 `Reassembler` 加上「拼齐后解析回记录」这一步，因此
+  任意顺序、重复扫描、容量未知这些性质与二维码载荷完全一致。这条路传的记录**不做认证**：
+  谁展示二维码谁决定拨给谁，真正的身份由连上去之后的握手证明。
 - **发现同时在每一张候选网卡上进行。** 网卡上有没有别人，是「广播域」的问题，不是「路由」的
   问题：一台机器上若有 VPN 隧道、虚拟机网桥或容器网络，按路由挑一张网卡就可能在谁也公告不了
   的地方加入组播组——听不到任何人，而且不报任何错。因此每一张候选网卡各开一个 socket，全部
@@ -185,8 +205,8 @@ crate 的 1.89；**「不联网」目前只到「不构建 relay、不注册 DNS
 ## 状态
 
 已实现：二维码的容量模型、编码、渲染、文本信封、动态二维码（多帧的拆与拼）、从图像里
-解码（`scan-image`，默认开启）；局域网 UDP 组播发现与连接信息；局域网数据面
-（`iroh-lan`，默认关闭）。
+解码（`scan-image`，默认开启）；局域网 UDP 组播发现与连接信息，以及把连接信息放进二维码
+带外传递的那条路；局域网数据面（`iroh-lan`，默认关闭）。
 
 尚未实现：各平台的局域网权限流程——Android 17（targetSdk 37+）需要在运行时申请
 `ACCESS_LOCAL_NETWORK`，iOS 需要 `NSLocalNetworkUsageDescription` 与组播 entitlement。

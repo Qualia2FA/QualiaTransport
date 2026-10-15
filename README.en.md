@@ -38,7 +38,8 @@ The LAN half (multicast discovery needs no extra feature):
 
 ```rust
 use qualia_transport::lan::lobby::Lobby;
-use qualia_transport::lan::LanAddress;
+use qualia_transport::lan::{LanAddress, LanAddressScanner};
+use qualia_transport::qr::{EcLevel, QrProfile};
 
 // Open the lobby: periodically announce "I am here, this is my endpoint key and port" into
 // a multicast group, and listen to the others.
@@ -55,7 +56,20 @@ while let Some(event) = lobby.try_poll() {
 // instead. The record holds the endpoint key and the port and **no address**: dialing also
 // needs an IP, and only the party that received a datagram from the peer has one (that is
 // `event.peer.source` above), so what travels out of band is who to look for.
-let bytes = LanAddress::new(my_endpoint_key, my_port).encode();
+let address = LanAddress::new(my_endpoint_key, my_port);
+
+// Displaying side: the record is a 42-byte payload like any other, so the QR half renders
+// it — capacity check and splitting included — and all the caller states is how many codes
+// the user is willing to scan.
+let profile = QrProfile::new(EcLevel::Low, 10)?;
+let symbols = address.to_qr_symbols(&profile, 4)?;
+
+// Scanning side: feed in every piece of text the camera reads. Any order, the same code
+// twice, both are fine; the call that completes the record returns it.
+let mut scanner = LanAddressScanner::new();
+if let Some(address) = scanner.push(scanned_text)? {
+    // Dial it — the endpoint key and the port come from here.
+}
 ```
 
 ## The four problems it solves
@@ -205,6 +219,16 @@ claim in public material that this channel is proven to stay offline.
   wrong", with no variable-length parsing that input could steer. The multicast TTL is
   fixed at 1: an announcement that drifts to another segment would make "a machine from the
   office next door shows up in the device list" a real, unexplainable symptom.
+- **The connection info is an ordinary payload carried through the QR half's capacity and
+  framing.** `LanAddress::to_qr_symbols` hands its 42 bytes to
+  `QrProfile::encode_payload_frames`: one code if one is enough (from version 4 at level L
+  it is), several frames if not. `LanAddress::to_qr_frame_texts` gives the texts of the same
+  split, and `LanAddress::to_qr_text` / `from_qr_text` are the single-code form. The scanning
+  side uses `LanAddressScanner` — a `Reassembler` plus the one step that parses the completed
+  payload back into a record — so any order, repeated scans and an unknown capacity behave
+  exactly as they do for any other QR payload. The record that travels this way is
+  **unauthenticated**: whoever shows the code decides which endpoint a scan dials, and the
+  handshake on the connection that follows is what proves the peer.
 - **Discovery runs on every candidate interface at once.** Whether anyone else is on an
   interface is a question about a **broadcast domain**, not about a route: on a machine with a
   VPN tunnel, a hypervisor bridge or a container network, picking one interface by route can
@@ -233,7 +257,8 @@ claim in public material that this channel is proven to stay offline.
 
 Implemented: the QR capacity model, encoding, rendering, the text envelope, animated QR
 (splitting and reassembly), decoding from an image (`scan-image`, on by default); LAN UDP
-multicast discovery and connection info; the LAN data plane (`iroh-lan`, off by default).
+multicast discovery and connection info, including the route that carries the connection info
+out of band in a QR code; the LAN data plane (`iroh-lan`, off by default).
 
 Not implemented: the per-platform local network permission flows — Android 17 (targetSdk
 37+) needs `ACCESS_LOCAL_NETWORK` requested at run time, and iOS needs
