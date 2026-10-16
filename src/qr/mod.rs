@@ -381,6 +381,43 @@ impl QrProfile {
     }
 }
 
+/// Encodes arbitrary text into one QR symbol, **without** this crate's envelope.
+///
+/// # Why this entry point exists
+///
+/// [`QrProfile::encode_payload`] carries bytes this crate owns: they are wrapped in the
+/// `Q2FA1:` envelope (Base32, alphanumeric mode, frame header) and only this crate's scanner
+/// reads them back. Text that **another application** has to read cannot go through that
+/// envelope — it must be that application's own spelling, character for character, which is
+/// what an exported `otpauth://` URI is. This encodes such text as it stands.
+///
+/// # What it does not decide
+///
+/// Everything a [`QrProfile`] decides for a channel is a parameter here: the caller names the
+/// error correction level and the **highest version it is willing to use**, which is what a
+/// caller drawing into a fixed-size image has to bound. There is no capacity to compare
+/// against and therefore no "how much is missing" answer: text that does not fit within the
+/// ceiling is [`Error::TextTooLong`], and the caller either allows more versions or shortens
+/// the text.
+///
+/// The version actually used is as small as the text allows; the ceiling is only a limit.
+///
+/// # Errors
+///
+/// - [`Error::TextTooLong`]: the text needs a version above `max_version`.
+/// - [`Error::VersionOutOfRange`]: `max_version` is outside 1–40.
+pub fn encode_text(text: &str, ec: EcLevel, max_version: u8) -> Result<Symbol> {
+    if !(MIN_VERSION..=MAX_VERSION).contains(&max_version) {
+        return Err(Error::VersionOutOfRange {
+            version: max_version,
+        });
+    }
+    encode_within(text, ec, max_version).ok_or(Error::TextTooLong {
+        bytes: text.len(),
+        max_version,
+    })
+}
+
 /// One generated QR code: the module matrix, without colour or scaling.
 ///
 /// It deliberately does not use the derived `Debug`: the matrix holds tens of thousands of
@@ -943,6 +980,42 @@ mod tests {
             );
         }
         assert!(EcLevel::from_letter('X').is_err());
+    }
+
+    /// Text goes in as it stands, the ceiling bounds it, and the encoder stays as small as it
+    /// can.
+    #[test]
+    fn text_is_encoded_as_it_stands_within_the_ceiling() {
+        let uri = "otpauth://totp/GitHub:alice?secret=JBSWY3DPEHPK3PXP&issuer=GitHub&digits=8";
+        let symbol = encode_text(uri, EcLevel::Low, 40).expect("a URI fits a large ceiling");
+        assert!(symbol.version() <= 40);
+
+        let tight = encode_text(uri, EcLevel::Low, symbol.version())
+            .expect("the version it chose itself must hold it");
+        assert_eq!(
+            tight.version(),
+            symbol.version(),
+            "the ceiling is a limit, not a target: the smallest version that fits is chosen"
+        );
+
+        match encode_text(uri, EcLevel::High, 1) {
+            Err(Error::TextTooLong { bytes, max_version }) => {
+                assert_eq!(bytes, uri.len(), "the byte count is the text's own");
+                assert_eq!(max_version, 1);
+            }
+            other => panic!("a version 1 code at level H cannot hold a URI: {other:?}"),
+        }
+        assert!(
+            matches!(
+                encode_text("text", EcLevel::Low, 0),
+                Err(Error::VersionOutOfRange { version: 0 })
+            ),
+            "a version ceiling outside 1-40 is refused"
+        );
+        assert!(matches!(
+            encode_text("text", EcLevel::Low, 41),
+            Err(Error::VersionOutOfRange { version: 41 })
+        ));
     }
 
     /// Rendering: image size, quiet zone, and dark modules at the right positions.

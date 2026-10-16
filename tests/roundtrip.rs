@@ -183,6 +183,29 @@ fn an_inverted_code_is_still_read() {
     );
 }
 
+/// Text that is **not** this crate's envelope comes back out exactly as it went in.
+///
+/// This is the path an exported `otpauth://` URI takes: it is another application's text, so
+/// it is encoded as it stands and read back by the plain text scanner. The scanner is the
+/// same one a camera feeds, so a code that reads here reads off a screen.
+#[test]
+fn text_without_the_envelope_round_trips_through_pixels() {
+    let uri =
+        "otpauth://totp/GitHub:alice?secret=JBSWY3DPEHPK3PXP&issuer=GitHub&digits=8&period=60";
+    let symbol = qr::encode_text(uri, EcLevel::Low, 40).expect("a URI fits");
+    assert!(
+        symbol.version() <= 40,
+        "the encoder used version {}, above the ceiling it was given",
+        symbol.version()
+    );
+    let image = symbol.render(3, 4).expect("the render geometry is legal");
+    assert_eq!(
+        qr::scan::decode_text(&image).expect("the code must read back"),
+        uri,
+        "the text read back differs from the one encoded"
+    );
+}
+
 /// Four error-correction levels × versions from the smallest to the largest: **each** one must
 /// render and read back.
 ///

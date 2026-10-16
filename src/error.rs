@@ -47,6 +47,20 @@ pub enum Error {
         limit: usize,
     },
 
+    /// The text does not fit a symbol within the requested version.
+    ///
+    /// This belongs to [`crate::qr::encode_text`], which encodes a caller's text as it
+    /// stands rather than wrapping it in this crate's envelope: there is no payload and no
+    /// channel capacity to compare against, so the two numbers are the text's own byte
+    /// length and the version ceiling that was asked for.
+    #[error("the text does not fit a version {max_version} symbol: {bytes} bytes")]
+    TextTooLong {
+        /// Byte length of the text that has to fit.
+        bytes: usize,
+        /// Highest version the caller was willing to use.
+        max_version: u8,
+    },
+
     /// The number of frames produced (or required) exceeds the format limit.
     ///
     /// The two numbers have **different units** from [`Error::PayloadTooLarge`]: that one is
