@@ -30,6 +30,10 @@ if let Some(payload) = reassembler.accept(frame)? {
 }
 ```
 
+**不是本库信封的内容**（例如要导出的 `otpauth://` URI）用 `encode_text`：它按原样编码调用方
+给的文本，不让它过信封——别的应用只认自己那套拼法，信封会得到一张谁也用不了的码。纠错级别与
+**版本上限**由调用方给（往固定尺寸的图里画就得有个上限），装不下报 `Error::TextTooLong`。
+
 局域网那一半（组播发现不需要额外 feature）：
 
 ```rust

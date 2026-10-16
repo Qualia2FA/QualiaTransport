@@ -34,6 +34,13 @@ if let Some(payload) = reassembler.accept(frame)? {
 }
 ```
 
+Text that is **not** this library's envelope — an exported `otpauth://` URI, say — goes through
+`encode_text`: it encodes the caller's text as it stands rather than wrapping it in the
+envelope, because another application only understands its own spelling, and an enveloped code
+is one nothing else can use. The error correction level and a **version ceiling** are the
+caller's (a caller drawing into a fixed-size image has to bound the version); text that does not
+fit reports `Error::TextTooLong`.
+
 The LAN half (multicast discovery needs no extra feature):
 
 ```rust
