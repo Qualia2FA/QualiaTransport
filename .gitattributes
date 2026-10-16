@@ -1,24 +1,37 @@
-# 统一按 LF 存入库、且在 Windows 上检出时也保持 LF，
-# 避免 LICENSE / COPYING.LESSER 等法律文本与官方原文行尾不一致。
+# Store everything with LF, and check it out with LF on every platform.
+#
+# Two reasons: the license texts (LICENSE, COPYING.LESSER) must stay byte-identical to
+# the official wording, and a checkout that rewrites line endings makes every file look
+# modified for no reason.
 * text=auto eol=lf
 
-# 二进制文件不做行尾转换
-*.png  binary
-*.jpg  binary
-*.jpeg binary
-*.gif  binary
-*.ico  binary
-*.webp binary
-*.woff binary
+# Windows batch files are the one exception: cmd.exe parses them poorly when they use LF,
+# which shows up as a wrapper script that fails on a label it cannot find.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files: no end-of-line conversion, no merge attempts.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.woff  binary
 *.woff2 binary
-*.pdf  binary
-*.exe  binary
-*.dll  binary
-*.lib  binary
+*.pdf   binary
+*.exe   binary
+*.dll   binary
+*.lib   binary
+*.so    binary
+*.dylib binary
+*.a     binary
+*.pdb   binary
 
-# fuzz 的回归样本：它们存在的理由是逐字节复现某个崩溃，因此**必须**按二进制存
-# （`* text=auto` 会在检出时改写行尾，而那样样本就不再是当初那一份了）。
-*.bin  binary
+# Fuzz regression samples: they exist to reproduce one crash byte for byte, so they must be
+# stored as binary. `* text=auto` would rewrite their line endings on checkout, and the sample
+# would no longer be the one that crashed.
+*.bin binary
 
-# Rust 源码：diff 时按 Rust 语法高亮
+# Rust sources: highlight them as Rust when diffing.
 *.rs diff=rust
