@@ -1,14 +1,30 @@
+<div align="center" style="align-items: center">
+
 # QualiaTransport
 
+[简体中文](README.md) | English
+
 The channels that move a short run of bytes between two devices: **QR codes** (split across
-several codes when one is not enough, including reading them back from an image) and the
-**LAN** (find each other on the same segment, then hand the bytes over).
+several codes when one is not enough) and the **LAN** (find each other on the same segment
+first, then transfer).
 
-It is an independently reusable library: any project that needs "let two devices exchange a
-small run of bytes" can use it without accepting Qualia2FA's vault format, account model or
-sync protocol.
+[![License](https://img.shields.io/github/license/Qualia2FA/QualiaTransport?label=License)][License]
+[![Releases](https://img.shields.io/github/downloads/Qualia2FA/QualiaTransport/total?logo=github&label=Downloads)][Releases]
+[![crates.io](https://img.shields.io/crates/d/qualia-transport?logo=crates.io&label=crates.io+Downloads)][crates.io]
 
-中文版见 [README.md](README.md).
+[License]: LICENSE
+
+[Releases]: https://github.com/Qualia2FA/QualiaTransport/releases
+
+[crates.io]: https://crates.io/crates/qualia-transport
+
+</div>
+
+---
+
+# Examples
+
+## The QR half
 
 ```rust
 use qualia_transport::qr::{EcLevel, QrProfile};
@@ -17,10 +33,10 @@ use qualia_transport::qr::{EcLevel, QrProfile};
 let profile = QrProfile::new(EcLevel::Medium, 20)?;
 
 // One code is enough if it fits; otherwise the payload is split into frames, and the user
-// is asked to scan at most six. A payload that does not fit fails **here** (with the bytes
+// is asked to scan at most six. A payload that does not fit fails here (with the bytes
 // needed and the limit), not after the user started scanning.
 let symbols = profile.encode_payload_frames(payload, 6)?;
-println!("{} codes to scan this time", symbols.len());
+println!("{} codes to scan in this exchange", symbols.len());
 
 // The host draws the matrix from modules(); render() produces pixels.
 let image = symbols[0].render(4, 4)?;
@@ -30,7 +46,7 @@ let image = symbols[0].render(4, 4)?;
 let frame = qualia_transport::qr::scan::decode_frame(&image)?;
 let mut reassembler = qualia_transport::frame::Reassembler::from_first_frame();
 if let Some(payload) = reassembler.accept(frame)? {
-    // Complete.
+    // Complete
 }
 ```
 
@@ -41,7 +57,9 @@ is one nothing else can use. The error correction level and a **version ceiling*
 caller's (a caller drawing into a fixed-size image has to bound the version); text that does not
 fit reports `Error::TextTooLong`.
 
-The LAN half (multicast discovery needs no extra feature):
+## The LAN half
+
+Multicast discovery needs no extra feature.
 
 ```rust
 use qualia_transport::lan::lobby::Lobby;
@@ -81,38 +99,45 @@ if let Some(address) = scanner.push(scanned_text)? {
 
 ## The four problems it solves
 
-**1. The capacity has to be known before it is used.** A QR code that does not fit simply
-does not fit; there is no retry, and finding out while the user is already holding up a
-phone is the worst possible moment. The library therefore reports the **exact limit** of a
-channel, and that number is **binary-searched against the encoder at run time** rather than
-copied from a table in the specification: a transcription error does not fail to compile,
-and the copied table starts drifting from real behaviour as soon as the encoder changes.
-The error for an oversized payload carries `needed` and `limit`, which is what lets a
-caller tell the user how far off it is and steer them to another channel.
+1. **The capacity has to be known before it is used.**
 
-**2. When one code is not enough, split instead of giving up.** The frame index and count
-were **in the text envelope from the first version** (`Q2FA1:<index>/<count>:<BASE32>`), so
-multi-frame introduced no new wire format: it is the first thing that actually produces
-`1/3`, `2/3`, `3/3`. The scanning side knows which codes are still missing **without
-decoding any of them**, and the reassembler accepts **any order** and repeated scans. This
-path needs no network infrastructure at all, which makes it the only one left when there is
-no WiFi and multicast is blocked.
+   A QR code that does not fit simply does not fit; there is no retry, and finding out while
+   the user is already holding up a phone is the worst possible moment. The library therefore
+   reports the **exact limit** of a channel, and that number is **binary-searched against the
+   encoder at run time** rather than copied from a table in the specification: a transcription
+   error does not fail to compile, and the copied table starts drifting from real behaviour as
+   soon as the encoder changes. The error for an oversized payload carries `needed` and
+   `limit`, which is what lets a caller tell the user how far off it is and steer them to
+   another channel.
 
-**3. A platform camera hands back text, not bytes.** Android's ML Kit, iOS's AVFoundation,
-the clipboard, and a string copied by eye can all carry text only. The payload therefore
-goes through a text envelope (`Q2FA1:<index>/<count>:<BASE32>`) and is then encoded in the
-QR code's **alphanumeric mode**: the whole string stays inside the 45-character table, at a
-cost of about 10% of the capacity, and in exchange every scanner reads the same string.
-Base32 rather than Base64 is chosen for exactly this reason — Base64's lower case letters
-are not in that table.
+2. **When one code is not enough, split instead of giving up.**
 
-**4. "Who is around" on a LAN should not require a scan every time.** Devices on the same
-WiFi are already in one broadcast domain, so the LAN half does discovery over **UDP
-multicast**: each device periodically announces its device id, endpoint public key and
-port, and everyone accumulates a list of who is on the segment. Discovery is
-**unauthenticated** — an announcement is a hint, and the real identity is proven by the
-handshake when a connection is established (see below). Across segments, or where multicast
-is blocked, the fallback is to carry the connection info out of band in a QR code.
+   The frame index and count were **in the text envelope from the first version**
+   (`Q2FA1:<index>/<count>:<BASE32>`), so multi-frame introduced no new format: it is the first
+   thing that actually produces `1/3`, `2/3`, `3/3`. The scanning side knows which codes are
+   still missing **without decoding the contents of any frame**, and the reassembler accepts
+   **any order** and repeated scans. This path needs no network infrastructure at all, which
+   makes it the only one left when there is no WiFi and multicast is blocked.
+
+3. **A platform camera hands back text, not bytes.**
+
+   Android's ML Kit, iOS's AVFoundation, the clipboard, and a string copied by eye can all
+   carry text only. The payload therefore goes through a text envelope
+   (`Q2FA1:<index>/<count>:<BASE32>`) and is then encoded in the QR code's **alphanumeric
+   mode**: the whole string stays inside the 45-character table, at a cost of about 10% of
+   the capacity, and in exchange every scanner reads the same string. Base32 rather than
+   Base64 is chosen for exactly this reason — Base64's lower case letters are not in that
+   table.
+
+4. **"Who is around" on a LAN should not require a scan every time.**
+
+   Devices on the same WiFi are already in one broadcast domain, so the LAN half does
+   discovery over **UDP multicast**: each device periodically announces its device id,
+   endpoint public key and port, and everyone accumulates a list of who is on the segment.
+   Discovery is **unauthenticated** — an announcement is a hint, and the real identity is
+   proven by the handshake when a connection is established (see below). Across segments, or
+   where multicast is blocked, the fallback is to carry the connection info out of band in a
+   QR code.
 
 ## The three multi-frame numbers, not to be confused
 
@@ -136,22 +161,24 @@ number.
 
 ## Two contracts of the LAN channel
 
-**Discovery may be unauthenticated; credentials must come from the channel.** A multicast
-group is shared media: any machine on the segment can inject arbitrary bytes, including a
-forged "I am device X" announcement. Announcements are therefore **not signed**; they only
-answer "who is probably on this segment and where do I reach them". "Is that really that
-device" is answered by the handshake when the connection is established, and "should this
-payload be accepted" is answered by the layer above through an allow list keyed by device
-id. Signing every announcement would wake the hardware keystore once per announce interval
-and gain nothing: a forged announcement only makes the receiver open a connection that
-cannot complete.
+- **Discovery may be unauthenticated; credentials must come from the channel.**
 
-**The wire format carries the sender's device id.** The transport layer knows only the
-endpoint public key (the one the handshake proves), while the layer above wants the device
-id (the one the user sees). The mapping between them comes from unauthenticated
-announcements and therefore **cannot be trusted**: every message carries the sender's own
-device id, and the receiver checks it against the allow list it already has. The field does
-not **establish** trust; it lets the receiver **apply** it.
+  A multicast group is shared media: any machine on the segment can inject arbitrary bytes,
+  including a forged "I am device X" announcement. Announcements are therefore **not signed**;
+  they only answer "who is probably on this segment and where do I reach them". "Is that
+  really that device" is answered by the handshake when the connection is established, and
+  "should this payload be accepted" is answered by the layer above through an allow list keyed
+  by device id. Signing every announcement would wake the hardware keystore once per announce
+  interval and gain nothing: a forged announcement only makes the receiver open a connection
+  that cannot complete.
+
+- **The wire format carries the sender's device id.**
+
+  The transport layer knows only the endpoint public key (the one the handshake proves), while
+  the layer above wants the device id (the one the user sees). The mapping between them comes
+  from unauthenticated announcements and therefore **cannot be trusted**: every message carries
+  the sender's own device id, and the receiver checks it against the allow list it already has.
+  The field does not **establish** trust; it lets the receiver **apply** it.
 
 ## Using it in your own project
 
