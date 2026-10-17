@@ -212,9 +212,10 @@ crate 的 1.89；**「不联网」目前只到「不构建 relay、不注册 DNS
 解码（`scan-image`，默认开启）；局域网 UDP 组播发现与连接信息，以及把连接信息放进二维码
 带外传递的那条路；局域网数据面（`iroh-lan`，默认关闭）。
 
-尚未实现：各平台的局域网权限流程——Android 17（targetSdk 37+）需要在运行时申请
-`ACCESS_LOCAL_NETWORK`，iOS 需要 `NSLocalNetworkUsageDescription` 与组播 entitlement。
-这两件属于端侧接入，本库不做。
+端侧接入：**Android 那一半已经实现**——应用本体在需要局域网通道的界面打开时申请
+`NEARBY_WIFI_DEVICES`（Android 13 起）与 `ACCESS_LOCAL_NETWORK`（Android 17 起），并持有
+组播锁，离开界面即释放。**iOS 那一半还没有**（`NSLocalNetworkUsageDescription` 与组播
+entitlement）。这两件事都属于端侧接入，本库不做。
 
 ## 参与贡献
 

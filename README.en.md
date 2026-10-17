@@ -267,10 +267,11 @@ Implemented: the QR capacity model, encoding, rendering, the text envelope, anim
 multicast discovery and connection info, including the route that carries the connection info
 out of band in a QR code; the LAN data plane (`iroh-lan`, off by default).
 
-Not implemented: the per-platform local network permission flows — Android 17 (targetSdk
-37+) needs `ACCESS_LOCAL_NETWORK` requested at run time, and iOS needs
-`NSLocalNetworkUsageDescription` plus the multicast entitlement. Those belong to host
-integration; this library does not do them.
+Host integration: **the Android half is implemented** — the application asks for
+`NEARBY_WIFI_DEVICES` (from Android 13) and `ACCESS_LOCAL_NETWORK` (from Android 17) when a
+screen that uses the LAN channel opens, holds a multicast lock while it is up, and releases
+both when it closes. **The iOS half is not** (`NSLocalNetworkUsageDescription` plus the
+multicast entitlement). Both belong to host integration; this library does not do them.
 
 ## Contributing
 
