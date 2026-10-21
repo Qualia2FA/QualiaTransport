@@ -1,6 +1,6 @@
 [package]
 name = "qualia-transport"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 # MSRV, the same as the rest of the repositories. This crate's own code compiles
 # on 1.85, and the tightest link is `rqrr` (1.85.1); the floor is pinned at 1.89
@@ -20,7 +20,7 @@ rust-version = "1.89"
 license = "LGPL-3.0-or-later"
 description = "Transport channels for Qualia2FA: QR code carriage and LAN discovery."
 repository = "https://github.com/Qualia2FA/QualiaTransport"
-readme = "README.md"
+readme = "README.en.md"
 keywords = ["qrcode", "qr", "transport", "offline", "2fa"]
 categories = ["encoding"]
 # CI configuration, the dependency audit manifest and the fuzz targets are not
