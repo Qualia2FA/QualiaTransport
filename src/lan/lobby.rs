@@ -70,7 +70,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use qualia_dik::DeviceId;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -317,6 +317,31 @@ pub struct Lobby {
     sequence: Arc<AtomicU64>,
 }
 
+/// The first announcement number of this lobby.
+///
+/// # Why it is not zero
+///
+/// A receiver keeps the highest number it has heard from each device and treats anything that is
+/// not higher as an old datagram, which is what suppresses reordering, duplicate delivery and a
+/// replayed recording. That watermark **outlives** the sender: a lobby that is closed and opened
+/// again — the same application, the same device identifier, a new socket — would start counting
+/// from zero, stay below the watermark of every peer that was listening, and be invisible for as
+/// long as it takes to count past it. The user sees the other device as "offline" while it is
+/// announcing every two seconds.
+///
+/// The counter therefore starts at the number of microseconds since the Unix epoch. A session
+/// emits one announcement per call to [`Lobby::announce_now`] or per announce period, so it can
+/// never reach the current time: a later session's first number is above an earlier session's
+/// last one, and the same rule that suppresses old datagrams lets the new session in. The cost is
+/// that a clock that jumps backwards can make a session look older than the one it replaces;
+/// the alternative is the invisible-forever state described above, which is what a device that
+/// sleeps or restarts hits every time.
+fn initial_sequence() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_micros() as u64)
+}
+
 impl Lobby {
     /// Opens the lobby: binds the port, joins the multicast group and starts
     /// announcing.
@@ -353,7 +378,7 @@ impl Lobby {
         let sockets = Arc::new(bind_multicast(config)?);
         let (sender, events) = mpsc::channel();
         let running = Arc::new(AtomicBool::new(true));
-        let sequence = Arc::new(AtomicU64::new(0));
+        let sequence = Arc::new(AtomicU64::new(initial_sequence()));
 
         let worker = {
             let sockets = Arc::clone(&sockets);
@@ -957,12 +982,52 @@ mod tests {
         let socket = bind_one(config(72, 0, ANNOUNCE_INTERVAL_MS), Ipv4Addr::LOCALHOST)
             .expect("must bind the socket");
         assert_eq!(
-            socket
-                .local_addr()
-                .expect("must have a local address")
-                .ip(),
+            socket.local_addr().expect("must have a local address").ip(),
             std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             "a socket that must hear the group has to be bound to the wildcard"
+        );
+    }
+
+    /// **A lobby opened after another one announces a higher number than the first one ever
+    /// did.**
+    ///
+    /// This is the property that makes a device visible again after its application closed and
+    /// reopened the lobby: receivers keep the highest number heard per device, and a session that
+    /// started over from zero would stay below every watermark that outlived it. Both sessions
+    /// here use port zero, so they do not compete for one port.
+    #[test]
+    fn a_new_lobby_announces_above_the_previous_session() {
+        let first = Lobby::open_with(
+            DeviceId::from_bytes([3; 32]),
+            endpoint(3),
+            41_020,
+            config(73, 0, ANNOUNCE_INTERVAL_MS),
+        );
+        let Ok(first) = first else {
+            return;
+        };
+        let before = first.sequence.load(Ordering::Relaxed);
+        for _ in 0..5 {
+            let _ = first.announce_now();
+        }
+        let last_of_first = first.sequence.load(Ordering::Relaxed);
+        assert!(before > 0, "a session must not start at zero");
+        assert!(last_of_first > before, "announcing advances the counter");
+
+        drop(first);
+
+        let second = Lobby::open_with(
+            DeviceId::from_bytes([3; 32]),
+            endpoint(3),
+            41_020,
+            config(73, 0, ANNOUNCE_INTERVAL_MS),
+        );
+        let Ok(second) = second else {
+            return;
+        };
+        assert!(
+            second.sequence.load(Ordering::Relaxed) > last_of_first,
+            "a peer that kept the watermark of the first session has to see the second one"
         );
     }
 
