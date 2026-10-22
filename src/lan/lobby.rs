@@ -576,23 +576,32 @@ fn serve(
     }
 }
 
-/// Binds the socket and joins the multicast group.
+/// Binds one socket per candidate interface and joins the multicast group.
 ///
 /// # Socket options
 ///
 /// `SO_REUSEADDR` **must** be set before `bind`: without it a second process on the
 /// same machine either fails to bind (Windows) or receives no multicast at all
-/// (Linux). The socket is bound to the wildcard address, the only form that behaves
-/// the same everywhere: it receives everything arriving on that port, and
-/// `join_multicast_v4` then decides which groups are delivered to it. Binding the
-/// group address instead filters unicast out on Linux but loses multicast on
-/// Windows as well. The interface passed to the join is `UNSPECIFIED`, which leaves
-/// the choice to the routing table; `IP_MULTICAST_TTL` is fixed at 1 so
-/// announcements stay on this segment; `IP_MULTICAST_LOOP` is left enabled, which
-/// same-machine tests rely on. `std`'s `UdpSocket::bind` sets no options, and
-/// `setsockopt` is `unsafe` while this crate has `#![forbid(unsafe_code)]`, so the
-/// options above are set through `socket2` before the socket is handed to
-/// `UdpSocket::from`.
+/// (Linux). `IP_MULTICAST_TTL` is fixed at 1 so announcements stay on this segment,
+/// and `IP_MULTICAST_LOOP` is left enabled, which same-machine tests rely on. `std`'s
+/// `UdpSocket::bind` sets no options, and `setsockopt` is `unsafe` while this crate
+/// has `#![forbid(unsafe_code)]`, so all of it goes through `socket2` before the
+/// socket is handed to `UdpSocket::from`.
+///
+/// # The bound address is per platform
+///
+/// On Linux and the BSDs — Android included — a socket receives a datagram only when
+/// the datagram's destination address equals the address the socket is bound to. A
+/// multicast datagram is addressed to the **group**, so a socket bound to one
+/// interface's unicast address matches nothing and receives no announcement at all,
+/// silently: hearing nobody is also what a quiet segment looks like. Those platforms
+/// therefore bind the wildcard, and the per-interface `join_multicast_v4` plus
+/// `IP_MULTICAST_IF` are what keep the sockets apart and their announcements leaving
+/// by the interface they belong to.
+///
+/// Windows delivers multicast by group membership rather than by bound address, so
+/// binding the interface address there is what keeps several sockets on one port
+/// apart.
 ///
 /// # Cost of the wildcard bind
 ///
@@ -619,11 +628,10 @@ fn bind_multicast(config: LanConfig) -> Result<Vec<Arc<UdpSocket>>> {
     Ok(bound)
 }
 
-/// Binds one socket to `address`, joins the group on it, and sends multicast from it.
+/// Binds one socket to [bind_address], joins the group on `address`, and sends multicast from it.
 ///
-/// Binding to the address rather than to the wildcard is what keeps the sockets apart: a
-/// datagram that arrives on one interface is delivered to the socket that joined the group
-/// there, so the same announcement is not processed once per interface.
+/// The join is what decides which interface's traffic reaches this socket; the bound address is
+/// the wildcard wherever the platform filters by destination address (see [`bind_multicast`]).
 fn bind_one(config: LanConfig, address: Ipv4Addr) -> Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
         .map_err(|_| Error::LanSocket { operation: "new" })?;
@@ -634,7 +642,7 @@ fn bind_one(config: LanConfig, address: Ipv4Addr) -> Result<UdpSocket> {
             operation: "set_reuse_address",
         })?;
 
-    let bind_addr = SocketAddr::V4(SocketAddrV4::new(address, config.port));
+    let bind_addr = SocketAddr::V4(SocketAddrV4::new(bind_address(address), config.port));
     socket
         .bind(&bind_addr.into())
         .map_err(|_| Error::LanSocket { operation: "bind" })?;
@@ -666,6 +674,20 @@ fn bind_one(config: LanConfig, address: Ipv4Addr) -> Result<UdpSocket> {
         })?;
 
     Ok(UdpSocket::from(socket))
+}
+
+/// The local address a multicast socket is bound to on this platform.
+///
+/// The wildcard everywhere the platform filters an incoming datagram by its destination
+/// address: a multicast datagram names the group, so a socket bound to an interface's unicast
+/// address receives nothing. Windows matches by group membership instead, and there the
+/// interface address is what keeps several sockets on one port apart.
+fn bind_address(interface: Ipv4Addr) -> Ipv4Addr {
+    if cfg!(windows) {
+        interface
+    } else {
+        Ipv4Addr::UNSPECIFIED
+    }
 }
 
 /// Encodes an announcement and sends it to the configured group address.
@@ -920,6 +942,28 @@ mod tests {
             }
             Err(other) => panic!("impossible error: {other:?}"),
         }
+    }
+
+    /// **Where the platform filters by destination address, the receiving socket is bound to the
+    /// wildcard.**
+    ///
+    /// A multicast datagram is addressed to the group, so a socket bound to one interface's
+    /// unicast address matches nothing and receives no announcement at all — silently, because a
+    /// segment where nobody announces looks exactly the same. This pins the bound address that
+    /// makes receiving possible on Linux, the BSDs and Android.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_receiving_socket_is_bound_to_the_wildcard() {
+        let socket = bind_one(config(72, 0, ANNOUNCE_INTERVAL_MS), Ipv4Addr::LOCALHOST)
+            .expect("must bind the socket");
+        assert_eq!(
+            socket
+                .local_addr()
+                .expect("must have a local address")
+                .ip(),
+            std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            "a socket that must hear the group has to be bound to the wildcard"
+        );
     }
 
     /// **Two sockets really see each other on one group and port.**
